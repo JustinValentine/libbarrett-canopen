@@ -263,12 +263,23 @@ int CANopen::awaitBootUp(const CommunicationsBus& bus, int node, double timeout_
 {
 	unsigned char data[8];
 	size_t len;
-	double start = highResolutionSystemTime();
 
+	// Drain heartbeats buffered from BEFORE the reset: acting on a stale
+	// frame means SDO-configuring a node that is still mid-reboot (the
+	// first wake attempt on the real arm failed exactly this way).  Only
+	// a frame arriving from now on proves the node is back.
+	while (bus.receive(COB_HB_BASE + node, data, len, false) == 0) {
+	}
+
+	double start = highResolutionSystemTime();
 	while (true) {
 		int ret = bus.receive(COB_HB_BASE + node, data, len, false);
 		if (ret == 0) {
-			return 0;  // boot-up or heartbeat: the node is alive
+			// Fresh boot-up (or first post-boot heartbeat).  Give the
+			// application's SDO server a moment to come up before the
+			// configuration writes start.
+			btsleepRT(0.3);
+			return 0;
 		}
 		if (highResolutionSystemTime() - start > timeout_s) {
 			return 1;
