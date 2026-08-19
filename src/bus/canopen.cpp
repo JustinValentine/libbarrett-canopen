@@ -36,6 +36,47 @@
 namespace barrett {
 namespace bus {
 
+/* Out-of-class definitions: pre-C++17, ODR-used static const members
+   (e.g. passed by const reference into std::vector::push_back) need
+   these or the link fails. */
+const int CANopen::SAFETY_NODE;
+const int CANopen::HOST_NODE;
+const int CANopen::MIN_PUCK_NODE;
+const int CANopen::MAX_PUCK_NODE;
+const int CANopen::COB_NMT;
+const int CANopen::COB_SYNC;
+const int CANopen::COB_EMCY_BASE;
+const int CANopen::COB_TPDO1_BASE;
+const int CANopen::COB_QUAD_A;
+const int CANopen::COB_QUAD_B;
+const int CANopen::COB_TPDO2_BASE;
+const int CANopen::COB_SDO_TX_BASE;
+const int CANopen::COB_SDO_RX_BASE;
+const int CANopen::COB_HB_BASE;
+const int CANopen::COB_HB_HOST;
+const int CANopen::NMT_START;
+const int CANopen::NMT_STOP;
+const int CANopen::NMT_PREOP;
+const int CANopen::NMT_RESET_NODE;
+const int CANopen::NMT_RESET_COMM;
+const int CANopen::OD_DEVICE_TYPE;
+const int CANopen::OD_IDENTITY;
+const int CANopen::OD_SYNC_PERIOD;
+const int CANopen::OD_HB_PRODUCER;
+const int CANopen::OD_CONTROLWORD;
+const int CANopen::OD_STATUSWORD;
+const int CANopen::OD_MODE_SET;
+const int CANopen::OD_MODE_DISPLAY;
+const int CANopen::OD_POSITION;
+const int CANopen::OD_TARGET_TORQUE;
+const int CANopen::OD_RATED_TORQUE;
+const int CANopen::OD_INTERP_PERIOD;
+const int CANopen::OD_ENC_CONFIG;
+const int CANopen::MODE_CST;
+const int CANopen::SB_PROP_BASE;
+const int CANopen::SYNC_PERIOD_US;
+const int CANopen::PUCK_HB_PERIOD_MS;
+
 namespace {
 
 // SDO command specifiers (CiA 301, expedited transfers)
