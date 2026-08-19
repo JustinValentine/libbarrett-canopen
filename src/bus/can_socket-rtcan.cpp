@@ -154,15 +154,8 @@ void CANSocket::open(int port) throw(std::logic_error, std::runtime_error)
 		}
 	}
 
-	struct can_filter recvFilter[1];
-	recvFilter[0].can_id = (Puck::HOST_ID << Puck::NODE_ID_WIDTH) | CAN_INV_FILTER;
-	recvFilter[0].can_mask = Puck::FROM_MASK;
-	ret = rt_dev_setsockopt(handle->h, SOL_CAN_RAW, CAN_RAW_FILTER, &recvFilter, sizeof(recvFilter));
-	if (ret != 0) {
-		close();
-		(logMessage("CANSocket::%s(): Could not open CAN port. rt_dev_setsockopt(CAN_RAW_FILTER): (%d) %s")
-				% __func__ % -ret % strerror(-ret)).raise<std::runtime_error>();
-	}
+	/* CANopen port: no kernel-side receive filter (see the note in
+	   can_socket-linux.cpp). */
 
 	// Note: This must be done after the rt_dev_ioctl(SIOCGCANSTATE) call above,
 	// otherwise rt_dev_send() will fail with ret = -6 (No such device or

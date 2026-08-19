@@ -164,6 +164,14 @@ public:
 	static const int SET_MASK = 0x80;
 	static const int PROPERTY_MASK = 0x7f;
 
+	/* CANopen (docs/canopen-contract.md in the puck2 repo): map a
+	   numeric property id to the object-dictionary address and transfer
+	   size for a node.  The safety board serves every BarrettCAN
+	   property at 0x2000 + p (contract section 4.2); motor pucks expose
+	   a small set of CiA-402 equivalents.  Returns false if the
+	   property has no OD home on that node. */
+	static bool propToOd(int id, int propId, int* index, int* sub, int* nbytes);
+
 	static constexpr double WAKE_UP_TIME = 1.0;  // seconds
 	static constexpr double TURN_OFF_TIME = 0.01;  // seconds
 

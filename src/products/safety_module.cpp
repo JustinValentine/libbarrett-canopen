@@ -110,13 +110,18 @@ void SafetyModule::setDefaultSafetyLimits()
 
 void SafetyModule::setTorqueLimit(double fault, double warning, int ipnm)
 {
-	assert(fault > 0.0);
-	if (warning < 0.0) {
-		warning = 0.9 * fault;
-	}
-
-	p->setProperty(Puck::TL2, (int)(fault*ipnm));
-	p->setProperty(Puck::TL1, (int)(warning*ipnm));
+	// CANopen/CST: TL1/TL2 are now in per-mille of motor rated torque,
+	// not motor-current counts, and the Nm -> per-mille conversion is
+	// per-motor (contract OPEN-2, unresolved by decision).  Writing
+	// fault*ipnm here would set a meaningless threshold, so this call
+	// is disabled until OPEN-2 lands; the safety board keeps its own
+	// (provisional) defaults, which setDefaultSafetyLimits() reloads.
+	(void)ipnm;
+	logMessage("SafetyModule::%s(): DISABLED pending the CANopen "
+			"torque-limit unit change (contract OPEN-2). "
+			"Requested fault=%.2f Nm, warning=%.2f Nm ignored; "
+			"the safety board's stored TL1/TL2 remain in effect.", true)
+			% __func__ % fault % warning;
 }
 
 void SafetyModule::setVelocityLimit(double fault, double warning)

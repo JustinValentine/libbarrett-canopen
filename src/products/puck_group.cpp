@@ -43,7 +43,9 @@ namespace barrett {
 PuckGroup::PuckGroup(int _id, const std::vector<Puck*>& _pucks) :
 	id(_id), pucks(_pucks), bus(pucks[0]->getBus())
 {
-	if ( !(id & Puck::GROUP_MASK)  ||  (id & Puck::TO_MASK) != id) {
+	// CANopen: a group id is any 11-bit COB-ID (the torque quads live
+	// at 0x201/0x205, which lack the old BarrettCAN GROUP bit).
+	if (id <= 0  ||  id > 0x7FF) {
 		throw std::invalid_argument("PuckGroup::PuckGroup(): Invalid Group ID.");
 	}
 }

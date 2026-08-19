@@ -46,6 +46,7 @@
 #include <barrett/detail/stl_utils.h>
 #include <barrett/bus/abstract/communications_bus.h>
 #include <barrett/bus/bus_manager.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/hand.h>
 #include <barrett/products/gimbals_hand_controller.h>
@@ -172,7 +173,6 @@ ProductManager::~ProductManager()
 void ProductManager::enumerate()
 {
 	int ret, result;
-	int propId = Puck::getPropertyId(Puck::STAT, Puck::PT_Unknown, 0);
 	Puck* p = NULL;
 	int lastId = -1;
 	int id;
@@ -188,7 +188,11 @@ void ProductManager::enumerate()
 
 	logMessage("  Pucks:");
 	for (int id = Puck::MIN_ID; id <= Puck::MAX_ID; ++id) {
-		ret = Puck::tryGetProperty(*bus, id, propId, &result);
+		// CANopen node probe (contract section 10): every CANopen
+		// device answers an SDO read of 0x1000 (device type); the old
+		// broadcast STAT poll does not exist on this bus.
+		ret = bus::CANopen::sdoUpload(*bus, id, bus::CANopen::OD_DEVICE_TYPE, 0,
+				&result, 0.02);
 		p = getPuck(id);
 
 		if (ret == 0) {

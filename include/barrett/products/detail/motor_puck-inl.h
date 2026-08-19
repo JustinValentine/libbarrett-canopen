@@ -31,6 +31,8 @@
  */
 
 
+#include <stdint.h>
+
 #include <barrett/os.h>
 
 
@@ -39,12 +41,19 @@ namespace barrett {
 
 template<typename ResultType>
 int MotorPuck::MotorPositionParser<ResultType>::parse(int id, int propId, result_type* result, const unsigned char* data, size_t len) {
-	if (len != 3 && len != 6) {
-		logMessage("%s: expected message length of 3 or 6, got message length of %d") % __func__ % len;
+	// CANopen: position actual value 0x6064 as a 4-byte little-endian
+	// i32 TPDO payload (contract section 6.3).  Full 32-bit counts -
+	// the old 22-bit sign extension and its wrap concern are gone.
+	if (len != 4) {
+		logMessage("%s: expected a 4-byte position TPDO, got message length of %d") % __func__ % len;
 		return 1;
 	}
 
-	*result = twentyTwoBit2<ResultType>(data[0], data[1], data[2]);
+	*result = static_cast<ResultType>(static_cast<int32_t>(
+			(uint32_t)data[0]
+			| ((uint32_t)data[1] << 8)
+			| ((uint32_t)data[2] << 16)
+			| ((uint32_t)data[3] << 24)));
 	return 0;
 }
 template<typename ResultType>

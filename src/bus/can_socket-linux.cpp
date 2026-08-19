@@ -109,15 +109,12 @@ void CANSocket::open(int port)
 	sprintf(devname, "can%d", port);
 	strncpy(ifr.ifr_name, devname, IFNAMSIZ);
 
-	struct can_filter recvFilter[1];
-	recvFilter[0].can_id = (Puck::HOST_ID << Puck::NODE_ID_WIDTH) | CAN_INV_FILTER;
-	recvFilter[0].can_mask = Puck::FROM_MASK;
-	ret = setsockopt(handle->h, SOL_CAN_RAW, CAN_RAW_FILTER, &recvFilter, sizeof(recvFilter));
-	if (ret != 0) {
-		close();
-		(logMessage("CANSocket::%s(): Could not open CAN port. setsockopt(CAN_RAW_FILTER): (%d) %s")
-				% __func__ % -ret % strerror(-ret)).raise<std::runtime_error>();
-	}
+	/* CANopen port: no kernel-side receive filter.  The old BarrettCAN
+	   filter dropped frames whose FROM field was the host, but CANopen
+	   identifiers carry no sender field in those bits and the host wants
+	   TPDOs, SDO responses, EMCYs, boot-ups, and heartbeats alike.
+	   SocketCAN does not loop back our own frames to the sending socket
+	   by default, so there is nothing to exclude. */
 
 	// Note: This must be done after the ioctl(SIOCGCANSTATE) call above,
 	// otherwise send() will fail with ret = -6 (No such device or

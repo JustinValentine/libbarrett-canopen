@@ -45,6 +45,7 @@
 #include <barrett/os.h>
 #include <barrett/detail/stl_utils.h>
 #include <barrett/units.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/motor_puck.h>
 #include <barrett/products/safety_module.h>
@@ -67,12 +68,16 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 	safetyModule(_safetyModule), torqueGroups(),
 	home(setting["home"]), j2mp(setting["j2mp"]),
 	noJointEncoders(true), positionSensor(PS_MOTOR_ENCODER),
-	lastUpdate(0.0), torquePropId(group.getPropertyId(Puck::T))
+	lastUpdate(0.0), torquePropId(group.getPropertyIdNoThrow(Puck::T)),
+	hbDivider(0)
 {
 	logMessage("  Config setting: %s => \"%s\"") % setting.getSourceFile() % setting.getPath();
 
 
-	group.setProperty(Puck::MODE, MotorPuck::MODE_IDLE);  // Make sure the Pucks are IDLE
+	// CANopen: no MODE_IDLE broadcast is needed here.  The pucks power
+	// up (and are configured by Puck::wake()) in the CiA-402
+	// Switch-on-disabled state, and only the safety board's controlword
+	// broadcast can enable torque (contract section 7.1).
 
 
 	// Zero-compensation?
@@ -93,10 +98,11 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 
 
 	// Setup torque groups
-	// If no IDs are provided, use the defaults
+	// If no IDs are provided, use the defaults: the CANopen torque-quad
+	// COB-IDs (contract section 3)
 	if (torqueGroupIds.size() == 0) {
-		torqueGroupIds.push_back(PuckGroup::BGRP_LOWER_WAM);
-		torqueGroupIds.push_back(PuckGroup::BGRP_UPPER_WAM);
+		torqueGroupIds.push_back(bus::CANopen::COB_QUAD_A);
+		torqueGroupIds.push_back(bus::CANopen::COB_QUAD_B);
 	}
 	size_t numTorqueGroups = ceil(static_cast<double>(DOF)/MotorPuck::PUCKS_PER_TORQUE_GROUP);
 	if (numTorqueGroups > torqueGroupIds.size()) {
@@ -131,11 +137,13 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 	}
 	p2jp = m2jp * rpc.asDiagonal();
 
-	v_type ipnm;
+	// CANopen/CST torque scale: per-mille of rated torque per Nm
+	// replaces IPNM (contract section 5.2)
+	v_type ppnm;
 	for (size_t i = 0; i < DOF; ++i) {
-		ipnm[i] = motorPucks[i].getIpnm();
+		ppnm[i] = motorPucks[i].getPermillePerNm();
 	}
-	j2pt = ipnm.asDiagonal() * j2mt;
+	j2pt = ppnm.asDiagonal() * j2mt;
 
 
 	// Zero the WAM?
@@ -290,38 +298,46 @@ void LowLevelWam<DOF>::update()
 {
 	double now = highResolutionSystemTime();
 
-	if (noJointEncoders) {
-		// Changing realtime to false. If this thread never yields, there is a chance the CAN request will never go out.
-		//group.getProperty<MotorPuck::MotorPositionParser<double> >(Puck::P, pp.data(), true);
-		group.getProperty<MotorPuck::MotorPositionParser<double> >(Puck::P, pp.data(), false);
-		jp_motorEncoder = p2jp * pp;  // Convert from Puck positions to joint positions
-		jp_best = jp_motorEncoder;
-	} else {
-		// Make sure the reinterpret_cast below makes sense.
-		BOOST_STATIC_ASSERT(sizeof(MotorPuck::CombinedPositionParser<double>::result_type) == 2*sizeof(double));
+	// CANopen execution cycle (contract sections 7.2/10): emit one SYNC
+	// at the top of the cycle - the pucks apply the previously received
+	// torque quads and transmit their position TPDO1s - then collect
+	// the DOF positions.  The host heartbeat (0x77F, the SB's
+	// IDLE-state host-liveness signal) rides the same cycle at 250 ms.
+	// Joint encoders are out of the CANopen port's scope (contract
+	// section 1), so the old secondary-encoder path is gone.
+	{
+		BARRETT_SCOPED_LOCK(bus.getMutex());
 
-		// PuckGroup::getProperty() will fill pp_jep.data() with 2*DOF doubles:
-		// Primary Encoder 1, Secondary Encoder 1, Primary Encoder 2, Secondary Encoder 2, ...
-		group.getProperty<MotorPuck::CombinedPositionParser<double> >(
-				Puck::P,
-				reinterpret_cast<MotorPuck::CombinedPositionParser<double>::result_type*>(pp_jep.data()),
-				false);
-		jp_motorEncoder = p2jp * pp_jep.col(0);
+		bus::CANopen::sync(bus);
+		if (++hbDivider >= 125) {  // 250 ms at the 500 Hz cycle rate
+			hbDivider = 0;
+			bus::CANopen::hostHeartbeat(bus);
+		}
 
+		unsigned char data[bus::CommunicationsBus::MAX_MESSAGE_LEN];
+		size_t len;
 		for (size_t i = 0; i < DOF; ++i) {
-			if (pp_jep(i,1) == std::numeric_limits<double>::max()) {
-				jp_jointEncoder[i] = 0.0;
-				jp_best[i] = jp_motorEncoder[i];
-			} else {
-				jp_jointEncoder[i] = jointEncoder2jp[i] * pp_jep(i,1);
-				if (useJointEncoder[i]) {
-					jp_best[i] = jp_jointEncoder[i];
-				} else {
-					jp_best[i] = jp_motorEncoder[i];
-				}
+			int busId = bus::CANopen::COB_TPDO1_BASE + pucks[i]->getId();
+			int ret = bus.receive(busId, data, len, true);
+			if (ret != 0) {
+				(logMessage("LowLevelWam::%s(): Failed to receive position "
+						"TPDO for Puck %d: receive() returned %d.")
+						% __func__ % pucks[i]->getId() % ret)
+						.template raise<std::runtime_error>();
 			}
+			double counts;
+			if (MotorPuck::MotorPositionParser<double>::parse(
+					pucks[i]->getId(), 0, &counts, data, len) != 0) {
+				(logMessage("LowLevelWam::%s(): Malformed position TPDO "
+						"from Puck %d.") % __func__ % pucks[i]->getId())
+						.template raise<std::runtime_error>();
+			}
+			pp[i] = counts;
 		}
 	}
+
+	jp_motorEncoder = p2jp * pp;  // Convert from Puck positions to joint positions
+	jp_best = jp_motorEncoder;
 
 	jv_best = (jp_best - jp_best_1) / (now - lastUpdate);
 	// TODO(dc): Detect unreasonably large velocities
@@ -361,7 +377,9 @@ void LowLevelWam<DOF>::definePosition(const jp_type& jp)
 		// Synchronize with execution-cycle
 		BARRETT_SCOPED_LOCK(bus.getMutex());
 		for (size_t i = 0; i < DOF; ++i) {
-			pucks[i]->setProperty(Puck::P, floor(pp[i]));
+			// CANopen zeroing (contract section 5.4): the manufacturer
+			// set-position object replaces the old P-register write
+			bus::CANopen::definePuckPosition(bus, pucks[i]->getId(), floor(pp[i]));
 		}
 	}
 

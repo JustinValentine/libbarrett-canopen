@@ -37,6 +37,7 @@
 #include <boost/tuple/tuple.hpp>
 
 #include <barrett/bus/abstract/communications_bus.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/math/utils.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/abstract/special_puck.h>
@@ -58,7 +59,8 @@ public:
 
 
 	MotorPuck(Puck* puck = NULL) :
-		SpecialPuck(Puck::PT_Motor), cts(0), rpc(0.0), cpr(0.0), ipnm(0) { setPuck(puck); }
+		SpecialPuck(Puck::PT_Motor), cts(0), rpc(0.0), cpr(0.0), ipnm(0),
+		ppnm(0.0) { setPuck(puck); }
 	~MotorPuck() {}
 
 	void setPuck(Puck* puck);
@@ -72,11 +74,19 @@ public:
 	int getIpnm() const { return ipnm; }
 	int nm2i(double torque) const { return floor(math::saturate(torque*ipnm, MAX_PUCK_TORQUE)); }
 
+	/** CANopen/CST torque scale: per-mille of rated torque per Nm
+	    (contract section 5.2; derived from 0x6076 at setPuck() time). */
+	double getPermillePerNm() const { return ppnm; }
+
 	bool foundIndexPulse() const {
 		return (p->getProperty(Puck::ECMIN) != 0)  ||  (p->getProperty(Puck::ECMAX) != 0);
 	}
 
 
+	/** Send one torque quad (contract sections 6.1/6.2): four i16
+	    little-endian per-mille torque slots on the given COB-ID
+	    (0x201 or 0x205).  Unused slots are sent as zero.  propId is
+	    unused (kept for call-site compatibility). */
 	static void sendPackedTorques(const bus::CommunicationsBus& bus, int groupId, int propId,
 			const double* pt, int numTorques);
 
@@ -84,11 +94,17 @@ public:
 	static const size_t PUCKS_PER_TORQUE_GROUP = 4;
 	static const int MAX_PUCK_TORQUE = 8191;
 
+	/** Saturation bound for per-mille torque commands.  PROVISIONAL
+	    (contract OPEN-2 family): 300% of rated torque, pending the
+	    real peak-torque figure for the P4-37 drives. */
+	static const int MAX_TORQUE_PERMILLE = 3000;
+
 
 	template<typename ResultType>
 	struct MotorPositionParser {
 		static int busId(int id, int propId) {
-			return Puck::encodeBusId(id, PuckGroup::FGRP_MOTOR_POSITION);
+			// CANopen: positions arrive as each puck's TPDO1 after a SYNC
+			return bus::CANopen::COB_TPDO1_BASE + id;
 		}
 
 		typedef ResultType result_type;
@@ -118,6 +134,7 @@ protected:
 	int cts;
 	double rpc, cpr;
 	int ipnm;
+	double ppnm;  // per-mille of rated torque per Nm (contract section 5.2)
 
 private:
 	template<typename ResultType>

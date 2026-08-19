@@ -115,6 +115,7 @@ protected:
 
 	v_type pt;
 	int torquePropId;
+	int hbDivider;  // CANopen: host-heartbeat cadence within update()
 
 private:
 	static const enum Puck::Property props[];

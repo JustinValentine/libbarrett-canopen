@@ -38,6 +38,7 @@
 #include <boost/tuple/tuple.hpp>
 
 #include <barrett/bus/abstract/communications_bus.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/math/utils.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/motor_puck.h>
@@ -52,11 +53,21 @@ void MotorPuck::setPuck(Puck* puck)
 	SpecialPuck::setPuck(puck);
 
 	if (p != NULL) {
-		cts = p->getProperty(Puck::CTS);
+		// CANopen: counts per revolution from the encoder configuration
+		// object, torque scale from the motor rated torque (contract
+		// section 5.2).  IPNM is a BarrettCAN concept and stays unset.
+		cts = 0;
+		if (bus::CANopen::sdoUpload(p->getBus(), p->getId(),
+				bus::CANopen::OD_ENC_CONFIG, 1, &cts) != 0  ||  cts <= 0) {
+			(logMessage("MotorPuck::%s(): ID=%d: bad encoder resolution %d.")
+					% __func__ % p->getId() % cts).raise<std::runtime_error>();
+		}
 		rpc = 2*M_PI / cts;
 		cpr = cts / (2*M_PI);
 
-		ipnm = p->getProperty(Puck::IPNM);
+		int ratedTorque_mNm = bus::CANopen::readRatedTorque(p->getBus(), p->getId());
+		ppnm = 1.0e6 / ratedTorque_mNm;  // (1000 permille/rated) * (1000 mNm/Nm)
+		ipnm = 0;
 	}
 }
 
@@ -64,36 +75,25 @@ void MotorPuck::setPuck(Puck* puck)
 void MotorPuck::sendPackedTorques(const bus::CommunicationsBus& bus, int groupId, int propId,
 		const double* pt, int numTorques)
 {
+	(void)propId;  // CANopen frames carry no property byte
+
 	unsigned char data[8];
-	int tmp0, tmp1;
 
 	if (numTorques < 0  ||  numTorques > 4) {
 		throw std::logic_error("MotorPuck::sendPackedTorques(): numTorques must be >= 0 and <= PUCKS_PER_TORQUE_GROUP.");
-		return;
 	}
 
-	// Special value-packing compilation: Packs (4) 14-bit values into 8 bytes
-	//     0        1        2        3        4        5        6        7
-	// ATPPPPPP AAAAAAaa aaaaaaBB BBBBbbbb bbbbCCCC CCcccccc ccDDDDDD dddddddd
-	data[0] = propId | Puck::SET_MASK;
+	// Torque quad (contract sections 6.1/6.2): four i16 little-endian
+	// per-mille-of-rated-torque slots.  Unused slots are zero, which is
+	// also the correct pad for quad B's reserved bytes 6-7.
+	for (int i = 0; i < 4; ++i) {
+		int permille = (i >= numTorques) ? 0
+				: (int)floor(math::saturate(pt[i], (double)MAX_TORQUE_PERMILLE));
+		data[2*i]     = permille & 0xFF;
+		data[2*i + 1] = (permille >> 8) & 0xFF;
+	}
 
-	tmp0 = (numTorques < 1) ? 0 : floor(math::saturate(pt[0], MAX_PUCK_TORQUE));
-	data[1] = static_cast<unsigned char>( ( tmp0 >> 6) & 0x00FF );
-
-	tmp1 = (numTorques < 2) ? 0 : floor(math::saturate(pt[1], MAX_PUCK_TORQUE));
-	data[2] = static_cast<unsigned char>( ((tmp0 << 2) & 0x00FC) | ((tmp1 >> 12) & 0x0003) );
-	data[3] = static_cast<unsigned char>( ( tmp1 >> 4) & 0x00FF );
-
-	tmp0 = (numTorques < 3) ? 0 : floor(math::saturate(pt[2], MAX_PUCK_TORQUE));
-	data[4] = static_cast<unsigned char>( ((tmp1 << 4) & 0x00F0) | ((tmp0 >> 10) & 0x000F) );
-	data[5] = static_cast<unsigned char>( ( tmp0 >> 2) & 0x00FF );
-
-	tmp1 = (numTorques < 4) ? 0 : floor(math::saturate(pt[3], MAX_PUCK_TORQUE));
-	data[6] = static_cast<unsigned char>( ((tmp0 << 6) & 0x00C0) | ((tmp1 >> 8) & 0x003F) );
-	data[7] = static_cast<unsigned char>(tmp1 & 0x00FF);
-
-
-	bus.send(Puck::nodeId2BusId(groupId), data, 8);
+	bus.send(groupId, data, 8);  // groupId is the quad COB (0x201/0x205)
 }
 
 

@@ -120,7 +120,10 @@ int BusManager::updateBuffers() const
 	while (true) {
 		ret = receiveRaw(busId, data, len, false);  // non-blocking read
 		if (ret == 0) {  // successfully received a message
-			if (busId != 1344) storeMessage(busId, data, len); // disregard safetyboard broadcast message
+			// Buffers are keyed by raw CAN identifier, which under
+			// CANopen is the COB-ID.  (The old BarrettCAN special case
+			// that dropped busId 0x540 is gone.)
+			storeMessage(busId, data, len);
 		} else if (ret == 1) {  // would block
 			return 0;
 		} else {  // error
@@ -131,9 +134,14 @@ int BusManager::updateBuffers() const
 
 void BusManager::storeMessage(int busId, const unsigned char* data, size_t len) const
 {
-	if (messageBuffers[busId].full()) {
-		(logMessage("BusManager::%s: Buffer overflow. ID = %d",true) %__func__ %busId).raise<std::runtime_error>();
-	}
+	// CANopen carries continuous unsolicited traffic the host does not
+	// always consume (statusword TPDOs, heartbeats, EMCYs, the SB
+	// status TPDO).  The buffers are rings: when one is full, push_back
+	// overwrites the oldest entry - newest-wins is the correct policy
+	// for cyclic telemetry, and consumers of request/reply traffic
+	// (SDO) drain their buffers promptly.  (The old code raised on
+	// overflow, which would kill the control thread within seconds of
+	// the first unconsumed periodic broadcast.)
 	messageBuffers[busId].push_back(Message(data, len));
 }
 
