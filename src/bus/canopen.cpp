@@ -440,9 +440,18 @@ void CANopen::armCstMode(const CommunicationsBus& bus, int node)
 		btsleepRT(0.01);
 	}
 
-	// Step back down; the SB's activation sequence owns enabling from
-	// here (contract section 7.1)
-	checkedDownload(bus, node, OD_CONTROLWORD, 0, 0x0006, 2);  // shutdown
+	// Deliberately DO NOT step back down.  ARM-VERIFIED 2026-08-19: the
+	// mode SETTING (0x6060) survives a drive-disable, but the mode
+	// DISPLAY (0x6061) reads 0 whenever the drive is not operating -
+	// and the SB's activate sequencer preconditions on the DISPLAY
+	// showing CST (pendant 'C' warning otherwise), so it can never pass
+	// with disabled drives.  Leaving the drive Operation-Enabled at
+	// zero torque satisfies the precondition; the SB's own sequence
+	// then cycles the drives through fault-reset/enable on statusword
+	// gates.  Zero-torque-enabled is motion-equivalent to disabled and
+	// every e-stop path is unaffected.  The proper fix (SB checks the
+	// mode display AFTER its enable steps) is queued for the next SB
+	// firmware revision.
 }
 
 
