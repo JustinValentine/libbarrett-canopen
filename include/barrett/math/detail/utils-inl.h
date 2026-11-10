@@ -163,7 +163,8 @@ inline const Eigen::CwiseUnaryOp<
 
 inline double saturate(double x, double lowerLimit, double upperLimit)
 {
-	assert(lowerLimit < upperLimit);
+	// A zero-width interval is useful for a disabled/passive actuator.
+	assert(lowerLimit <= upperLimit);
 
 	if (x > upperLimit) {
 		return upperLimit;

@@ -56,11 +56,6 @@ template<size_t DOF>
 class LowLevelWamWrapper {
 	BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
 
-public:		System::Input<jt_type>& input;
-public:		System::Output<jp_type>& jpOutput;
-public:		System::Output<jv_type>& jvOutput;
-
-
 public:
 	// genericPucks must be ordered by joint and must break into torque groups as arranged
 	LowLevelWamWrapper(ExecutionManager* em, const std::vector<Puck*>& genericPucks,
@@ -139,8 +134,13 @@ protected:
 
 	LowLevelWam<DOF> llw;
 
-	Sink sink;
 	Source source;
+	Sink sink;
+
+	// Bind public aliases only after their owning source/sink are constructed.
+public:		System::Input<jt_type>& input;
+public:		System::Output<jp_type>& jpOutput;
+public:		System::Output<jv_type>& jvOutput;
 
 private:
 	DISALLOW_COPY_AND_ASSIGN(LowLevelWamWrapper);

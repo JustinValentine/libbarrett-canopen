@@ -36,6 +36,7 @@
 
 
 #include <barrett/thread/abstract/mutex.h>
+#include <barrett/thread/real_time_mutex.h>
 
 
 namespace barrett {
@@ -44,12 +45,18 @@ namespace bus {
 
 class CommunicationsBus {
 public:
+	CommunicationsBus() : sensorOnlyNodes(0) {}
 	static const size_t MAX_MESSAGE_LEN = 8;  /** The maximum of any of the available communications buses */
 	static constexpr double TIMEOUT = 1.0;  /** Bus connection timeout limit in seconds */
 
 	virtual ~CommunicationsBus() {} /** Destructor */
 
 	virtual thread::Mutex& getMutex() const = 0;
+	// Serialize request/reply transactions without holding the CAN I/O lock.
+	// Split property API users must hold this across send AND receive.
+	// If both locks are needed, acquire this one BEFORE getMutex(). Wrappers
+	// must delegate to the underlying bus so they share transaction ownership.
+	virtual thread::Mutex& getSdoMutex() const { return sdoMutex; }
 
 	virtual void open(int port) = 0;
 	virtual void close() = 0;
@@ -58,6 +65,13 @@ public:
 	virtual int send(int busId, const unsigned char* data, size_t len) const = 0;
 	virtual int receive(int expectedBusId, unsigned char* data, size_t& len, bool blocking = true, bool realtime = false) const;
 	virtual int receiveRaw(int& busId, unsigned char* data, size_t& len, bool blocking = true) const = 0;
+
+private:
+	mutable thread::RealTimeMutex sdoMutex;
+	// CANopen product policy belongs to this physical bus, not the process.
+	// Set during idle startup before any real-time execution begins.
+	mutable int sensorOnlyNodes;
+	friend class CANopen;
 };
 
 

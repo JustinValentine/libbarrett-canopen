@@ -209,9 +209,11 @@ inline typename Wam<DOF>::jv_type Wam<DOF>::getJointVelocities() const
 	{
 		BARRETT_SCOPED_LOCK(getEmMutex());
 
-		// Return the filtered velocity, if available.
-		if (jvController1.feedbackInput.valueDefined()) {
-			return jvController1.feedbackInput.getValue();
+		// The filter is managed independently of the velocity controller. Read
+		// its cached sample so idle/torque-control getters agree with jvOutput;
+		// an inactive controller's input is undefined even when the filter ran.
+		if (jvFilter.hasExecutionManager()) {
+			return jvFilter.getOutput();
 		}
 	}
 

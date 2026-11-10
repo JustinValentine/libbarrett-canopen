@@ -36,6 +36,7 @@
 #include <limits>
 #include <cmath>
 #include <cassert>
+#include <algorithm>
 
 #include <errno.h>
 
@@ -74,9 +75,7 @@ RealTimeExecutionManager::RealTimeExecutionManager(const libconfig::Setting& set
 
 RealTimeExecutionManager::~RealTimeExecutionManager()
 {
-	if (isRunning()) {
-		stop();
-	}
+	stop();
 }
 
 
@@ -91,12 +90,26 @@ void RealTimeExecutionManager::start()
 	if ( !isRunning() ) {
 		thread::DisableSecondaryModeWarning dsmw;
 
-		boost::thread tmpThread(&RealTimeExecutionManager::executionLoopEntryPoint, this);
+		if (thread.joinable()) thread.join();
+		std::shared_ptr<std::promise<void> > startup(new std::promise<void>);
+		std::future<void> ready = startup->get_future();
+		boost::thread tmpThread(&RealTimeExecutionManager::executionLoopEntryPoint, this, startup);
 		thread.swap(tmpThread);
 
-		// block until the thread starts reporting its new state
-		while ( !isRunning() ) {
-			btsleep(period / 10.0);
+		// Setup failures must reach the caller, not escape a worker and
+		// terminate the process (or leave start() spinning indefinitely).
+		try {
+			ready.get();
+		} catch (const std::exception& e) {
+			thread.join();
+			errorStr = e.what();
+			error = true;
+			throw;
+		} catch (...) {
+			thread.join();
+			errorStr = "Unknown control-thread startup failure";
+			error = true;
+			throw;
 		}
 	}
 	// TODO(dc): else, throw an exception?
@@ -104,18 +117,21 @@ void RealTimeExecutionManager::start()
 
 void RealTimeExecutionManager::stop()
 {
-	thread.interrupt();
-	thread.join();
+	if (thread.joinable()) {
+		thread.interrupt();
+		thread.join();
+	}
 	assert( !isRunning() );
 }
 
 void RealTimeExecutionManager::clearError()
 {
+	// Do not join while holding the mutex the worker uses to report errors.
+	stop();
 	BARRETT_SCOPED_LOCK(getMutex());
 
 	error = false;
 	errorStr = "";
-	stop();
 }
 
 void RealTimeExecutionManager::setErrorCallback(callback_type callback)
@@ -130,8 +146,20 @@ void RealTimeExecutionManager::clearErrorCallback()
 	setErrorCallback(callback_type());
 }
 
-void RealTimeExecutionManager::executionLoopEntryPoint()
+void RealTimeExecutionManager::executionLoopEntryPoint(std::shared_ptr<std::promise<void> > startup)
 {
+	std::unique_ptr<PeriodicLoopTimer> loopTimer;
+	try {
+		barrett::detail::configureRealtimeThread(priority);
+		loopTimer.reset(new PeriodicLoopTimer(period, priority));
+	} catch (...) {
+		startup->set_exception(std::current_exception());
+		return;
+	}
+	running = true;
+	startup->set_value();
+	startup.reset();
+
 	uint32_t period_us = period * 1e6;
 	double start;
 	uint32_t duration;
@@ -143,14 +171,12 @@ void RealTimeExecutionManager::executionLoopEntryPoint()
 	uint32_t overruns = 0;
 	uint32_t missedReleasePoints = 0;
 
-	PeriodicLoopTimer loopTimer(period, priority);
-	running = true;
 	try {
 		while (true) {
 			// Explicit interruption point
 			boost::this_thread::interruption_point();
 
-			missedReleasePoints += loopTimer.wait();
+			missedReleasePoints += loopTimer->wait();
 			start = highResolutionSystemTime();
 
 			runExecutionCycle();
@@ -163,7 +189,7 @@ void RealTimeExecutionManager::executionLoopEntryPoint()
 				max = duration;
 			}
 			sum += duration;
-			sumSq += duration * duration;
+			sumSq += static_cast<uint64_t>(duration) * duration;
 			++loopCount;
 			if (duration > period_us) {
 				++overruns;
@@ -171,21 +197,25 @@ void RealTimeExecutionManager::executionLoopEntryPoint()
 		}
 	} catch (const boost::thread_interrupted& e) {
 		// Interruption requested, probably by stop(). Do nothing.
-	} catch (const ExecutionManagerException& e) {
+	} catch (const std::exception& e) {
+		// Say so: the thread ends here, and a program idling in
+		// waitForMode() would otherwise never learn why the WAM went quiet.
+		logMessage("RealTimeExecutionManager: control loop stopped: %s", true) % e.what();
 		BARRETT_SCOPED_LOCK(getMutex());
 
-		error = true;
 		errorStr = e.what();
+		error = true;
 
 		if (errorCallback) {
-			errorCallback(this, e);
+			errorCallback(this, ExecutionManagerException(e.what()));
 		}
 	}
 	running = false;
 
 
-	double mean = (double)sum / loopCount;
-	double stdev = std::sqrt( ((double)sumSq/loopCount) - mean*mean );
+	double mean = loopCount ? (double)sum / loopCount : 0.0;
+	double stdev = loopCount ? std::sqrt(std::max(0.0, ((double)sumSq/loopCount) - mean*mean)) : 0.0;
+	if (!loopCount) min = 0;
 
     logMessage("RealTimeExecutionManager control-loop stats (microseconds):");
     logMessage("  target period = %u") % period_us;

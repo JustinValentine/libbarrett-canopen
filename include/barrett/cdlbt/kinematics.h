@@ -87,6 +87,8 @@ kinematics:
    moving:
    (
       # Note: alpha_pi = alpha / pi
+      # Optional moving theta_pi is a fixed offset: theta = q + theta_pi * pi.
+      # It defaults to zero and does not change encoder or home coordinates.
       { alpha_pi = -0.5; a =      0; d =      0; }, # Base Yaw
       { alpha_pi =  0.5; a =      0; d =      0; }, # Base Pitch
       { alpha_pi = -0.5; a =  0.045; d = 0.5500; }, # Twist

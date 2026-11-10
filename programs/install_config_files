@@ -42,7 +42,7 @@ DEFAULT_DEST_DIR = "/etc/barrett/"
 VERS_PATTERN = "^CONFIG_VERSION\s*=\s*(\d+);$"
 
 MAIN_VERS_FILE = "default.conf"
-MAIN_CONFIG_FILES = [MAIN_VERS_FILE, "wam3.conf", "wam4.conf", "wam7g.conf", "wam7w.conf", "calibration_data"]
+MAIN_CONFIG_FILES = [MAIN_VERS_FILE, "wam3.conf", "wam4.conf", "wam7g.conf", "wam7w.conf", "wam8g.conf", "calibration_data"]
 
 CAL_VERS_FILE = "calibration.conf"
 CAL_CONFIG_FILES = [CAL_VERS_FILE]
@@ -59,6 +59,9 @@ def main():
 	os.mkdir(backupDir)
 	
 	installConfig(args.source, args.dest, backupDir, MAIN_VERS_FILE, MAIN_CONFIG_FILES)
+	# New profiles can be added without changing the global config version.
+	# Fill only missing files; preserve installed calibration and default.conf.
+	installMissingProfiles(args.source, args.dest)
 	installConfig(args.source, args.dest, backupDir, CAL_VERS_FILE, CAL_CONFIG_FILES)
 	installConfig(args.source, args.dest, backupDir, AUTOTENS_VERS_FILE, AUTOTENS_CONFIG_FILES)
 	
@@ -80,6 +83,20 @@ def parseArguments():
 	args.dest = cleanDirPath(args.dest)
 	args.source = cleanDirPath(args.source)
 	return args
+
+def installMissingProfiles(source, dest):
+	for profile in ("wam8g",):
+		paths = [profile + ".conf"]
+		calDir = os.path.join(source, "calibration_data", profile)
+		for directory, _, files in os.walk(calDir):
+			paths.extend(os.path.relpath(os.path.join(directory, f), source) for f in files)
+		for relative in paths:
+			src = os.path.join(source, relative)
+			dst = os.path.join(dest, relative)
+			if os.path.isfile(src) and not os.path.exists(dst):
+				os.makedirs(os.path.dirname(dst), exist_ok=True)
+				shutil.copy2(src, dst)
+				print("  --> Added missing profile file:", relative)
 
 def cleanDirPath(p):
 	p = os.path.abspath(os.path.expanduser(p))
@@ -178,4 +195,3 @@ def copyFileOrDir(src, dst):
 
 if __name__ == "__main__":
 	main()
-

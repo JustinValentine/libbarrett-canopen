@@ -38,6 +38,8 @@ public:
 	void setParameters(const T& a, const T& b, const T& c);
 
 	const T& eval(const T& input);
+	/// Most recently evaluated output (zero before the first sample).
+	const T& getOutput() const { return y_0; }
 
 	typedef const T& result_type;  ///< For use with boost::bind().
 	result_type operator() (const T& input) {

@@ -105,11 +105,8 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam) 
 	//Rate Limiter
 	jp_type rt_jp_cmd;
 	systems::RateLimiter<jp_type> jp_rl;
-	//Sets the joints to move at 1 m/s
-	const double rLimit[] = {1, 1, 1, 1, 1, 1, 1};
-
-	for(size_t i = 0; i < DOF; ++i)
-		rt_jp_cmd[i] = rLimit[i];
+	//Sets the joints to move at 1 rad/s (every DOF, including an 8-DOF wam8g)
+	rt_jp_cmd.setConstant(1.0);
 
   // Set start position, depending on robot type and configuration.
 	jp_type startPos(0.0);

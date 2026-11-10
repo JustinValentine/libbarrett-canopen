@@ -35,6 +35,7 @@ add_programs(
 	ex02_hold_position
 	ex03_simple_move
 	ex04_display_basic_info
+	ex04_gravity_ramp
 	ex05_systems_intro
 	ex06_realtime_move
 	ex07_realtime_data_logging
@@ -42,6 +43,8 @@ add_programs(
 	ex09_torque_control
 	ex10_haptics
 	ex11_master_master
+	wam8g_state
+	wam8_j8_sweep
 )
 
 # ex04 uses the ncurses library

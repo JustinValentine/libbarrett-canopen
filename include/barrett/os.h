@@ -42,8 +42,8 @@ void btsleep(double duration_s);
 void btsleepRT(double duration_s);
 void btsleep(double duration_s, bool realtime);
 
-/** highResolutionSystemTime maintains the current system time measured in seconds.
- *  The resolution is 1 nanosecond when using Xenomai.
+/** Monotonic time in seconds, with an unspecified epoch. Use differences to
+ *  measure elapsed time; wall-clock adjustments do not affect deadlines.
  */
 double highResolutionSystemTime();
 
@@ -55,7 +55,12 @@ struct periodic_info
 
 class PeriodicLoopTimer {
 public:
+	// On native Linux this sets the timer only. RealTimeExecutionManager
+	// configures its worker's scheduling and locked memory separately.
 	explicit PeriodicLoopTimer(double period_, int threadPriority = 10);
+	~PeriodicLoopTimer();
+	PeriodicLoopTimer(const PeriodicLoopTimer&) = delete;
+	PeriodicLoopTimer& operator=(const PeriodicLoopTimer&) = delete;
 
 	unsigned long wait();
 

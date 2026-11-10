@@ -90,6 +90,14 @@ public:
 	void setTorques(const jt_type& jt);
 	void definePosition(const jp_type& jp);
 
+	/** For bt-wam-zerocal: motor's single-turn encoder angle (rad, 0-2pi, as
+	    its puck reports it) with its joints at zero, from a reading taken
+	    with the joints at jp.  direction is how that encoder counts relative
+	    to the puck's position counter (bus::CANopen::singleTurnDirection).
+	    Startup uses these ("zeroangle", "zeroangle_dir") to zero the WAM
+	    from a rough home placement. */
+	double singleTurnAtZero(size_t motor, double reading, const jp_type& jp, int direction) const;
+
 
 	SafetyModule* getSafetyModule() const { return safetyModule; }
 
@@ -108,6 +116,8 @@ protected:
 
 	double lastUpdate;
 	v_type pp;
+	v_type ppOffset;  // CANopen: software zero (counts) added to the raw 0x6064 values
+	v_type posSign, trqSign;  // CANopen: per-motor +-1 from config canopen_position_sign / canopen_torque_sign
 	math::Matrix<DOF,2> pp_jep;
 	jp_type jp_motorEncoder, jp_jointEncoder;
 	jp_type jp_best, jp_best_1;
@@ -116,6 +126,12 @@ protected:
 	v_type pt;
 	int torquePropId;
 	int hbDivider;  // CANopen: host-heartbeat cadence within update()
+
+private:
+	int nodeMask() const;
+	void applyZero(const jp_type& jp, const v_type& rawPosition);
+	void recordZero(const jp_type& jp, const v_type& rawPosition);
+	void restoreZero();
 
 private:
 	static const enum Puck::Property props[];

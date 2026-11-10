@@ -68,42 +68,27 @@ BusManager::~BusManager()
 
 int BusManager::receive(int expectedBusId, unsigned char* data, size_t& len, bool blocking, bool realtime) const
 {
-	thread::Mutex& m = getMutex();
-	m.lock();
-
-	double start = highResolutionSystemTime();
-
-	if (retrieveMessage(expectedBusId, data, len)) {
-		m.unlock();
-		return 0;
-	}
-
-	int ret;
+	const double start = highResolutionSystemTime();
 	while (true) {
-		ret = updateBuffers();
-		if (ret != 0) {
-			m.unlock();
-			return ret;
-		} else if (retrieveMessage(expectedBusId, data, len)) {
-			m.unlock();
-			return 0;
-		} else if (!blocking) {
-			m.unlock();
-			return 1;
+		{
+			// Protect buffers and one nonblocking receive pass only. SDO
+			// ownership is protected separately by getSdoMutex(): a lost
+			// status reply must not stop SYNC/PDO/heartbeat traffic.
+			BARRETT_SCOPED_LOCK(getMutex());
+			if (retrieveMessage(expectedBusId, data, len)) return 0;
+			const int ret = updateBuffers();
+			if (ret != 0) return ret;
+			if (retrieveMessage(expectedBusId, data, len)) return 0;
+			if (!blocking) return 1;
 		}
 
 		double now = highResolutionSystemTime();
 		if ((now - start) > CommunicationsBus::TIMEOUT) {
-			m.unlock();
 			logMessage("BusManager::receive(): timed out. Now: %lf, Start: %lf", true) %now %start;
 			return 2;
 		}
 
-		//if (!realtime) {
-		//	int lc = m.fullUnlock();
-		//	btsleepRT(0.0001);			// Yield this thread, give CAN thread time to process data
-		//	m.relock(lc);
-		//}
+		if (!realtime) btsleepRT(0.0001);
 	}
 }
 

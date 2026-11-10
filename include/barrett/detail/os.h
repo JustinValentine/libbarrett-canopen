@@ -42,6 +42,11 @@
 namespace barrett {
 namespace detail {
 
+// Configure the calling control thread on native Linux. Priority 0 explicitly
+// opts out (for offline tests); positive priorities require RT/memlock rights.
+// Xenomai configures scheduling in PeriodicLoopTimer instead.
+void configureRealtimeThread(int priority);
+
 
 class LogFormatter : public boost::format {
 public:

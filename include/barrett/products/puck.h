@@ -103,13 +103,27 @@ public:
 	const bus::CommunicationsBus& getBus() const { return bus; }
 	int getId() const { return id; }
 	int getVers() const { return vers; }
+	/** CANopen pucks only: the raw 0x1018:03 identity revision (fw 4.3.x
+	    reports 1).  Not a BarrettCAN firmware version - see
+	    CANOPEN_PUCK_VERS.  -1 for the safety board. */
+	int getIdentityRevision() const { return identityRevision; }
 	int getRole() const { return role; }
 	bool hasOption(enum RoleOption ro) const { return role & ro; }
 	enum PuckType getType() const { return type; }
 	enum PuckType getEffectiveType() const { return effectiveType; }
+	/** CANopen: wake() has brought this puck up since the last
+	    enumeration, so later wake() calls leave it alone. */
+	bool isAwake() const { return awake; }
+	void setAwake(bool a) { awake = a; }
 
 
-	static void wake(std::vector<Puck*> pucks);
+	/** Make sure these pucks are awake.  CANopen: bring up every motor
+	    puck that is not awake yet - NMT reset, PDO configuration in
+	    pre-operational, NMT start, CST arming (contract section 10).
+	    resetFirst = false keeps the position counters running: the pucks
+	    are only reconfigured, and no drive is enabled.  That needs every
+	    drive still CST-armed and disabled, or the reset happens anyway. */
+	static void wake(std::vector<Puck*> pucks, bool resetFirst = true);
 
 	static int getProperty(const bus::CommunicationsBus& bus, int id, int propId, bool realtime = false);
 	template<typename Parser> static void getProperty(
@@ -122,6 +136,8 @@ public:
 	static void setProperty(const bus::CommunicationsBus& bus, int id, int propId,
 			int value, bool blocking = false);
 
+	// Split requests require bus.getSdoMutex() across send and receive.
+	// Never acquire it while holding bus.getMutex().
 	static int sendGetPropertyRequest(const bus::CommunicationsBus& bus, int id, int propId);
 	static int receiveGetPropertyReply(const bus::CommunicationsBus& bus, int id, int propId,
 			int* result, bool blocking, bool realtime);
@@ -172,6 +188,15 @@ public:
 	   property has no OD home on that node. */
 	static bool propToOd(int id, int propId, int* index, int* sub, int* nbytes);
 
+	/* The vers value assigned to CiA-402 (P4, fw 4.3.x) pucks.  vers
+	   selects the numeric property table in property_list.cpp and feeds
+	   firmware-version gates in the products; the identity revision (1)
+	   would select the pre-v33 numbering (T=10, P=26, CTS=30), which does
+	   not match the r197 numbering propToOd() decodes, and would flag
+	   every P4 as "old firmware".  Any value >= 175 selects the r197-era
+	   table. */
+	static const int CANOPEN_PUCK_VERS = 200;
+
 	static constexpr double WAKE_UP_TIME = 1.0;  // seconds
 	static constexpr double TURN_OFF_TIME = 0.01;  // seconds
 
@@ -204,7 +229,9 @@ protected:
 	const bus::CommunicationsBus& bus;
 	int id;
 	int vers, role;
+	int identityRevision;  // CANopen 0x1018:03, -1 if not read
 	enum PuckType type, effectiveType;
+	bool awake;
 
 private:
 	template<typename Parser>

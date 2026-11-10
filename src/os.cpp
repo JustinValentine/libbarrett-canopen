@@ -34,11 +34,18 @@
 #include <stdexcept>
 #include <iostream>
 #include <cassert>
+#include <cmath>
+#include <limits>
+#include <system_error>
+#include <cerrno>
 
 #include <syslog.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/timerfd.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sched.h>
 
 #ifdef BARRETT_XENOMAI
 #include <native/task.h>
@@ -125,22 +132,49 @@ void btsleep(double duration_s, bool realtime)
 	}
 }
 
-#ifndef BARRETT_XENOMAI
-// Record the time program execution began
-const boost::posix_time::ptime START_OF_PROGRAM_TIME = boost::posix_time::microsec_clock::local_time();
-#endif
 double highResolutionSystemTime()
 {
 #ifdef BARRETT_XENOMAI
 	return 1e-9 * rt_timer_read();
 #else
-	// total_nanoseconds() returns a long, which is insufficient beyond 2 seconds on a 32-bit system.
-	// Plus, the subtraction is performed in microseconds, so there is no advantage to converting to nano.
-	//return (boost::posix_time::microsec_clock::local_time() - START_OF_PROGRAM_TIME).total_nanoseconds() * 1e-9;
-	return (boost::posix_time::microsec_clock::local_time() - START_OF_PROGRAM_TIME).total_microseconds() * 1e-6;
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+		throw std::system_error(errno, std::generic_category(), "clock_gettime(CLOCK_MONOTONIC)");
+	}
+	return static_cast<double>(now.tv_sec) + now.tv_nsec * 1e-9;
 #endif
 }
 
+void detail::configureRealtimeThread(int priority)
+{
+#if defined(__linux__) && !defined(BARRETT_XENOMAI)
+	if (priority == 0) return;  // Explicit offline/non-RT mode, never a fallback.
+	if (priority < sched_get_priority_min(SCHED_FIFO) ||
+			priority > sched_get_priority_max(SCHED_FIFO)) {
+		throw std::invalid_argument("Real-time thread priority must be 1..99 (or 0 for offline tests).");
+	}
+	struct sched_param param = {};
+	param.sched_priority = priority;
+	const int ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+	if (ret != 0) {
+		throw std::system_error(ret, std::generic_category(),
+				"Cannot start control thread with SCHED_FIFO; run with RT permissions (e.g. sudo)");
+	}
+	if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+		throw std::system_error(errno, std::generic_category(),
+				"Cannot lock control-process memory; check CAP_IPC_LOCK / RLIMIT_MEMLOCK");
+	}
+	// Touch enough stack for the usual control path before it starts executing.
+	// This is not a substitute for avoiding allocations inside operate().
+	volatile unsigned char stack[64 * 1024];
+	for (size_t i = 0; i < sizeof(stack); ++i) stack[i] = 0;
+	logMessage("Control thread: SCHED_FIFO priority %d; memory locked") % priority;
+#else
+	(void)priority;
+#endif
+}
+
+#ifndef BARRETT_XENOMAI
 // period in us
 static int make_periodic (unsigned int period, struct periodic_info *info)
 {
@@ -151,7 +185,7 @@ static int make_periodic (unsigned int period, struct periodic_info *info)
 	struct itimerspec itval;
 
 	/* Create the timer */
-	fd = timerfd_create (CLOCK_MONOTONIC, 0);
+	fd = timerfd_create (CLOCK_MONOTONIC, TFD_CLOEXEC);
 	info->wakeups_missed = 0;
 	info->timer_fd = fd;
 	if (fd == -1)
@@ -165,6 +199,12 @@ static int make_periodic (unsigned int period, struct periodic_info *info)
 	itval.it_value.tv_sec = sec;
 	itval.it_value.tv_nsec = ns;
 	ret = timerfd_settime (fd, 0, &itval, NULL);
+	if (ret != 0) {
+		const int savedErrno = errno;
+		close(fd);
+		info->timer_fd = -1;
+		errno = savedErrno;
+	}
 	return ret;
 }
 
@@ -175,21 +215,26 @@ static void wait_period (struct periodic_info *info)
 
 	/* Wait for the next timer event. If we have missed any the
 	   number is written to "missed" */
-	ret = read (info->timer_fd, &missed, sizeof (missed));
-	if (ret == -1)
-	{
-		perror ("read timer");
-		return;
+	do {
+		ret = read(info->timer_fd, &missed, sizeof(missed));
+	} while (ret == -1 && errno == EINTR);
+	if (ret != sizeof(missed)) {
+		throw std::system_error(ret == -1 ? errno : EIO,
+				std::generic_category(), "read(timerfd)");
 	}
 
 	/* "missed" should always be >= 1, but just to be sure, check it is not 0 anyway */
-	if (missed > 0)
-		info->wakeups_missed = (missed - 1);
+	info->wakeups_missed = missed > 0 ? missed - 1 : 0;
 }
+#endif
 
 PeriodicLoopTimer::PeriodicLoopTimer(double period_, int threadPriority) :
 		firstRun(true), period(period_), releasePoint(-1.0)
 {
+	if (!std::isfinite(period) || period < 1e-6 ||
+			period * 1e6 > std::numeric_limits<unsigned int>::max()) {
+		throw std::invalid_argument("PeriodicLoopTimer requires a finite period of at least 1 microsecond.");
+	}
 #ifdef BARRETT_XENOMAI
 	int ret;
 
@@ -207,8 +252,17 @@ PeriodicLoopTimer::PeriodicLoopTimer(double period_, int threadPriority) :
 				% __func__ % -ret % strerror(-ret)).raise<std::runtime_error>();
 	}
 #else
-	logMessage("PeriodicLoopTimer is using timer_fd");
-	make_periodic (period * 1e6, &info);
+	(void)threadPriority;  // The execution manager configures its Linux worker.
+	if (make_periodic(period * 1e6, &info) != 0) {
+		throw std::system_error(errno, std::generic_category(), "create/arm periodic timerfd");
+	}
+#endif
+}
+
+PeriodicLoopTimer::~PeriodicLoopTimer()
+{
+#ifndef BARRETT_XENOMAI
+	close(info.timer_fd);
 #endif
 }
 

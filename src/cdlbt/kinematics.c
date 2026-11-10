@@ -54,6 +54,14 @@ static int eval_trans_to_world( struct bt_kinematics_link * link );
 
 /*  \} */
 
+/* Keep offsets private so existing binaries retain the public struct layout.
+ * Objects are allocated/destroyed by this module; the public object is first. */
+struct bt_kinematics_private
+{
+   struct bt_kinematics kin;
+   double * theta_offsets;
+};
+
 
 int bt_kinematics_create(struct bt_kinematics ** kinptr,
                          config_setting_t * kinconfig, int ndofs)
@@ -67,7 +75,7 @@ int bt_kinematics_create(struct bt_kinematics ** kinptr,
    if (kinconfig == 0) return 0;
 
    (*kinptr) = 0;
-   kin = (struct bt_kinematics *) malloc( sizeof(struct bt_kinematics) );
+   kin = (struct bt_kinematics *) calloc(1, sizeof(struct bt_kinematics_private));
    if (!kin)
    {
       syslog(LOG_ERR,"%s: Out of memory.",__func__);
@@ -90,6 +98,13 @@ int bt_kinematics_create(struct bt_kinematics ** kinptr,
    /* Create the links array */
    kin->dof = ndofs;
    kin->nlinks = 1 + ndofs + 1 + 1; /* base, toolplate, and tool */
+   ((struct bt_kinematics_private *)kin)->theta_offsets =
+      (double *)calloc(ndofs, sizeof(double));
+   if (!((struct bt_kinematics_private *)kin)->theta_offsets)
+   {
+      bt_kinematics_destroy(kin);
+      return -1;
+   }
    kin->link_array = (struct bt_kinematics_link **)
       malloc(kin->nlinks*sizeof(struct bt_kinematics_link *));
    if (!kin->link_array)
@@ -310,11 +325,26 @@ int bt_kinematics_create(struct bt_kinematics ** kinptr,
             || ( err = bt_gsl_config_double_from_group(link_grp,       "d",&(link->d)    ) )
             )
          {
-            syslog(LOG_ERR,"%s: No alpha_pi, theta_pi, a, and/or d in link %d, or not a number.",__func__,j);
+            syslog(LOG_ERR,"%s: No alpha_pi, a, and/or d in link %d, or not a number.",__func__,j);
             bt_kinematics_destroy(kin);
             return -1;
          }
          link->alpha *= M_PI;
+
+         /* Optional fixed DH rotation: theta = q + theta_pi * pi.
+          * Missing theta_pi retains the original zero-offset convention. */
+         if (config_setting_get_member(link_grp, "theta_pi"))
+         {
+            double offset;
+            if (bt_gsl_config_double_from_group(link_grp, "theta_pi", &offset)
+                || !isfinite(offset) || !isfinite(offset * M_PI))
+            {
+               syslog(LOG_ERR,"%s: Invalid theta_pi in link %d.",__func__,j);
+               bt_kinematics_destroy(kin);
+               return -1;
+            }
+            ((struct bt_kinematics_private *)kin)->theta_offsets[j] = offset * M_PI;
+         }
          
          /* Evaluate a few cache things */
          link->cos_alpha = cos(link->alpha);
@@ -490,7 +520,7 @@ int bt_kinematics_destroy( struct bt_kinematics * kin )
       gsl_vector_free(kin->temp_v3);
    
    for (i=0; i<kin->nlinks; i++)
-   if (kin->link_array[i])
+   if (kin->link_array && kin->link_array[i])
    {
       struct bt_kinematics_link * link;
       link = kin->link_array[i];
@@ -519,6 +549,7 @@ int bt_kinematics_destroy( struct bt_kinematics * kin )
    }
    
    if (kin->link_array) free(kin->link_array);
+   free(((struct bt_kinematics_private *)kin)->theta_offsets);
    free(kin);
    return 0;
 }
@@ -536,7 +567,8 @@ int bt_kinematics_eval( struct bt_kinematics * kin, const gsl_vector * jposition
      
       /* Step 1: Copy current joint positions into kinematics struct
        *         (revolute only) */
-      link->theta = gsl_vector_get( jposition, j );
+      link->theta = gsl_vector_get( jposition, j )
+         + ((struct bt_kinematics_private *)kin)->theta_offsets[j];
       
       /* Step 2: Evaluate the to_prev transform */
       eval_trans_to_prev( link );
@@ -643,7 +675,5 @@ static int eval_trans_to_world( struct bt_kinematics_link * link )
                   0.0, link->trans_to_world);
    return 0;
 }
-
-
 
 

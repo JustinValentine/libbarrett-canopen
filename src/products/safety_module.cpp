@@ -49,7 +49,7 @@ namespace barrett {
 
 
 SafetyModule::SafetyModule(Puck* puck) :
-	SpecialPuck(Puck::PT_Safety)
+	SpecialPuck(Puck::PT_Safety), zeroKept(false)
 {
 	setPuck(puck);
 
@@ -68,9 +68,30 @@ enum SafetyModule::SafetyMode SafetyModule::getMode(bool realtime) const {
 	return static_cast<enum SafetyMode>(mode);
 }
 
+enum SafetyModule::SafetyMode SafetyModule::pollMode() const
+{
+	// One SDO exchange lost on the bus (opus 2026-09-22: the MODE reply
+	// vanished while waiting for Shift-activate) took the whole
+	// application down.  Polling is read-only and idempotent, so retry a
+	// few times; a persistent failure still propagates.
+	const int MAX_CONSECUTIVE_FAILURES = 3;
+	for (int attempt = 1; ; ++attempt) {
+		try {
+			return getMode();
+		} catch (const std::runtime_error& e) {
+			if (attempt >= MAX_CONSECUTIVE_FAILURES) {
+				throw;
+			}
+			logMessage("SafetyModule::%s(): safety-board MODE poll %d of %d "
+					"failed (%s); retrying.", true)
+					% __func__ % attempt % MAX_CONSECUTIVE_FAILURES % e.what();
+		}
+	}
+}
+
 void SafetyModule::waitForMode(enum SafetyMode mode, bool printMessage, double pollingPeriod_s)
 {
-	if (getMode() == mode) {
+	if (pollMode() == mode) {
 		return;
 	}
 
@@ -79,20 +100,50 @@ void SafetyModule::waitForMode(enum SafetyMode mode, bool printMessage, double p
 	}
 	do {
 		btsleep(pollingPeriod_s);
-	} while (getMode() != mode);
+	} while (pollMode() != mode);
 }
 
 enum SafetyModule::SafetyMode SafetyModule::waitForModeChange(double pollingPeriod_s)
 {
-	const enum SafetyMode originalMode = getMode();
+	const enum SafetyMode originalMode = pollMode();
 	enum SafetyMode currentMode;
 
 	do {
 		btsleep(pollingPeriod_s);
-		currentMode = getMode();
+		currentMode = pollMode();
 	} while (currentMode == originalMode);
 
 	return currentMode;
+}
+
+bool SafetyModule::wamIsZeroed() const
+{
+	if (p->getVers() < bus::CANopen::SB_CANOPEN_VERS) {
+		return p->getProperty(Puck::ZERO) == 1;
+	}
+	// CANopen: ZERO says nothing about the host's software zero (and is
+	// kept at 0).  Before r209 every run zeroes the WAM again.
+	if ( !hasZeroRecord()  ||  bus::CANopen::zeroRecordNodes(p->getBus()) == 0) {
+		return false;
+	}
+	zeroKept = true;
+	return true;
+}
+
+void SafetyModule::setWamZeroed(bool zeroed) const
+{
+	if (p->getVers() >= bus::CANopen::SB_CANOPEN_VERS) {
+		if (zeroed) {
+			logMessage("SafetyModule::%s(): CANopen safety board - ZERO stays 0 "
+					"(the host keeps the WAM zero).") % __func__;
+			return;
+		}
+		if (hasZeroRecord()) {
+			bus::CANopen::clearZeroRecord(p->getBus());
+			zeroKept = false;
+		}
+	}
+	p->setProperty(Puck::ZERO, zeroed);
 }
 
 void SafetyModule::ignoreNextVelocityFault()
@@ -102,6 +153,19 @@ void SafetyModule::ignoreNextVelocityFault()
 
 void SafetyModule::setDefaultSafetyLimits()
 {
+	if (p->getVers() >= bus::CANopen::SB_CANOPEN_VERS) {
+		// CANopen safety board (r200+): TL1/TL2 are provisional per-mille
+		// values (contract OPEN-2, setTorqueLimit() is disabled) and
+		// VL1/VL2 are per-joint rad/s while the board is left in its
+		// joint-velocity mode.  Both are RAM-only on the board and are
+		// set from its console for a bench session; a DEF here silently
+		// wiped them on every program start (bench 2026-09-16: TL back to
+		// 1000/1200 and VL to 0.5/1.0 rad/s, which faulted a 0.5 rad/s
+		// calibration move).  Leave the operator's values alone.
+		logMessage("SafetyModule::%s(): CANopen safety board - keeping its "
+				"current TL1/TL2/VL1/VL2 (no DEF).") % __func__;
+		return;
+	}
 	p->resetProperty(Puck::VL1);
 	p->resetProperty(Puck::VL2);
 	p->resetProperty(Puck::TL1);

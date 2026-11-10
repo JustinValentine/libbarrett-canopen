@@ -36,6 +36,7 @@
 
 #include <string>
 
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/abstract/special_puck.h>
 
@@ -61,6 +62,11 @@ public:
 	 *
 	 */
 	enum SafetyMode getMode(bool realtime = false) const;
+	/** getMode() for polling loops: tolerates a few consecutive lost SDO
+	    exchanges with the safety board (each is logged) before it rethrows.
+	    A lost frame while an application merely waits for the pendant must
+	    not abort it. */
+	enum SafetyMode pollMode() const;
 	/** waitForMode Method
 	 *
 	 */
@@ -84,14 +90,24 @@ public:
 	void setMode(enum SafetyMode mode) { p->setProperty(Puck::MODE, mode); }
 	/** wamIsZeroed Method returns true/false flag that wam has been zeroed by user.
 	 *
+	 *  On a CANopen board with a host zero record (hasZeroRecord()), true
+	 *  means the zero of an earlier run is still held there, i.e. no puck
+	 *  has been reset since; the board's own ZERO flag stays 0 there.
 	 */
-	bool wamIsZeroed() const { return p->getProperty(Puck::ZERO) == 1; }
-	/** setWamZeroed Method 
+	bool wamIsZeroed() const;
+	/** setWamZeroed Method
 	 *
+	 *  setWamZeroed(false) also forgets a held zero record.  A CANopen
+	 *  board never gets ZERO = 1: it would switch the board to its stock
+	 *  WAM Cartesian velocity model over reset-relative puck counts.
 	 */
-	void setWamZeroed(bool zeroed = true) const {
-		p->setProperty(Puck::ZERO, zeroed);
-	}
+	void setWamZeroed(bool zeroed = true) const;
+	/** The board can hold the host's WAM zero across program runs
+	 *  (CANopen safety firmware r209+, OD 0x2103). */
+	bool hasZeroRecord() const { return p->getVers() >= bus::CANopen::SB_ZERO_RECORD_VERS; }
+	/** wamIsZeroed() has answered true in this process, so the operator
+	 *  was not asked to move the WAM home. */
+	bool zeroWasKept() const { return zeroKept; }
 	/**	ignoreNextVelocityFault Method overrides next velocity fault. 
 	 *
 	 */
@@ -145,6 +161,7 @@ protected:
 
 private:
 	static const char safetyModeStrs[][15];
+	mutable bool zeroKept;
 };
 
 

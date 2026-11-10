@@ -33,6 +33,9 @@
 
 
 #include <string>
+#include <atomic>
+#include <future>
+#include <memory>
 
 #include <boost/function.hpp>
 #include <boost/thread.hpp>
@@ -69,13 +72,13 @@ public:
 protected:
 	boost::thread thread;
 	int priority;
-	bool running;
+	std::atomic<bool> running;
 
-	bool error;
+	std::atomic<bool> error;
 	std::string errorStr;
 	callback_type errorCallback;
 
-	void executionLoopEntryPoint();
+	void executionLoopEntryPoint(std::shared_ptr<std::promise<void> > startup);
 
 private:
 	void init();

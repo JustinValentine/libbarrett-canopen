@@ -61,6 +61,7 @@ public:
 	/**
 	 */
 	virtual thread::Mutex& getMutex() const { return bus->getMutex(); }
+	virtual thread::Mutex& getSdoMutex() const { return bus->getSdoMutex(); }
 	/** Open Method creates the communication port on CANBus
 	 */
 	virtual void open(int port) { bus->open(port); }

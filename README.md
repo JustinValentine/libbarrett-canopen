@@ -80,6 +80,10 @@ make package
 ### Configuration Files for the WAM
 Upon installation of libbarrett, the configuration files of the robot are installed to the `/etc/barrett` directory. However, to give an additional flexibility of each user maintaining their own configurations for the same robot, by default, the configuration files are read from `~/.barrett` directory if it exists. If not, then libbarrett reads the necessary configuration files from `/etc/barrett/` directory. It is up to the user to maintain and populate the `~/.barrett` directory.
 
+Preview and edit DH geometry offline with `python3 scripts/visualize_dh.py --open`.
+See [DH Explorer](scripts/dh_viewer/README.md) for other robot profiles, controls,
+configuration export, and verification.
+
 ### Eclipse IDE setup
 It is possible to use CMake to generate several output formats, including Eclipse CDT4 project files. For details, see:
     http://www.paraview.org/Wiki/Eclipse_CDT4_Generator

@@ -98,6 +98,8 @@ TEST_F(MathUtilsTest, ScalarScalarSaturateTest1) {
 	EXPECT_EQ(1.6, math::saturate(1.6, 5.0));
 	EXPECT_EQ(-1.6, math::saturate(-1.6, 5.0));
 	EXPECT_EQ(-5, math::saturate(-12342.0, 5.0));
+	EXPECT_EQ(0, math::saturate(1.0, 0.0));
+	EXPECT_EQ(0, math::saturate(-1.0, 0.0));
 }
 
 TEST_F(MathUtilsTest, VectorScalarSaturateTest2) {

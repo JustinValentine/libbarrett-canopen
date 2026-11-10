@@ -43,12 +43,7 @@ inline void PuckGroup::getProperty(enum Puck::Property prop, int results[], bool
 }
 template<typename Parser> void PuckGroup::getProperty(enum Puck::Property prop, typename Parser::result_type results[], bool realtime) const
 {
-	//boost::unique_lock<thread::Mutex> ul(bus.getMutex(), boost::defer_lock);
-	//if (realtime) {
-	//	ul.lock();
-	//}
-
-	BARRETT_SCOPED_LOCK(bus.getMutex());
+	BARRETT_SCOPED_LOCK(bus.getSdoMutex());
 	
 	int propId = getPropertyId(prop);
 	sendGetPropertyRequest(propId);

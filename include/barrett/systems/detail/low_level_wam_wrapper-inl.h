@@ -51,10 +51,12 @@ LowLevelWamWrapper<DOF>::LowLevelWamWrapper(
 		const libconfig::Setting& setting,
 		std::vector<int> torqueGroupIds,
 		const std::string& sysName) :
-	input(sink.input),
-	jpOutput(source.jpOutput), jvOutput(source.jvOutput),
 	llw(genericPucks, safetyModule, setting, torqueGroupIds),
-	sink(this, em, sysName + "::Sink"), source(this, em, sysName + "::Source")
+	// Register feedback before torque output, including when torque input is
+	// constant or disconnected. Each cycle must SYNC/read all nodes before it
+	// sends the next command; feedback failure must prevent that command.
+	source(this, em, sysName + "::Source"), sink(this, em, sysName + "::Sink"),
+	input(sink.input), jpOutput(source.jpOutput), jvOutput(source.jvOutput)
 {
 }
 

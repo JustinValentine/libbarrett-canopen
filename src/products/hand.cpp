@@ -196,7 +196,7 @@ void Hand::setTorqueCommand(const jt_type& jt, unsigned int whichDigits) const
 void Hand::update(unsigned int sensors, bool realtime)
 {
 	// Do we need to lock?
-	//boost::unique_lock<thread::Mutex> ul(bus.getMutex(), boost::defer_lock);
+	//boost::unique_lock<thread::Mutex> ul(bus.getSdoMutex(), boost::defer_lock);
 	//if (realtime) {
 	//	ul.lock();
 	//}
@@ -204,7 +204,7 @@ void Hand::update(unsigned int sensors, bool realtime)
 	// Send requests
 	if (sensors & S_POSITION) {
 		{
-			BARRETT_SCOPED_LOCK(bus.getMutex());
+			BARRETT_SCOPED_LOCK(bus.getSdoMutex());
 			group.sendGetPropertyRequest(group.getPropertyId(Puck::P));
 
 			group.receiveGetPropertyReply<MotorPuck::CombinedPositionParser<int> >(group.getPropertyId(Puck::P), encoderTmp.data(), realtime);
@@ -234,7 +234,7 @@ void Hand::update(unsigned int sensors, bool realtime)
 	
 	if (hasFingertipTorqueSensors()  &&  sensors & S_FINGERTIP_TORQUE) {
 		{
-			BARRETT_SCOPED_LOCK(bus.getMutex());
+			BARRETT_SCOPED_LOCK(bus.getSdoMutex());
 			group.sendGetPropertyRequest(group.getPropertyId(Puck::SG));
 
 			group.receiveGetPropertyReply<Puck::StandardParser>(group.getPropertyId(Puck::SG), ftt.data(), realtime);
@@ -245,7 +245,7 @@ void Hand::update(unsigned int sensors, bool realtime)
 	
 	if (hasTactSensors()) {
 		if(sensors & S_TACT_FULL){
-			BARRETT_SCOPED_LOCK(bus.getMutex());
+			BARRETT_SCOPED_LOCK(bus.getSdoMutex());
 			// This should be TactilePuck::requestFull()
 			group.setProperty(Puck::TACT, TactilePuck::FULL_FORMAT);
 
@@ -255,7 +255,7 @@ void Hand::update(unsigned int sensors, bool realtime)
 		}
 
 		if (sensors & S_TACT_TOP10) {
-			BARRETT_SCOPED_LOCK(bus.getMutex());
+			BARRETT_SCOPED_LOCK(bus.getSdoMutex());
 			// This should be TactilePuck::requestTop10()
 			group.setProperty(Puck::TACT, TactilePuck::TOP10_FORMAT);
 

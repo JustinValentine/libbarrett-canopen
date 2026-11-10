@@ -106,8 +106,11 @@ public:
 	ToolTorqueToJointTorques<DOF> tpoTt2jt;
 	Summer<jt_type, 2> tpoSum;
 
-	Summer<jt_type, 3> jtSum;
-	enum {JT_INPUT = 0, GRAVITY_INPUT, SC_INPUT};
+	// A fourth, normally unconnected slot lets a derived product (Wam8g)
+	// add its own torque path without taking the public 'input' away
+	// from applications.
+	Summer<jt_type, 4> jtSum;
+	enum {JT_INPUT = 0, GRAVITY_INPUT, SC_INPUT, EXT_INPUT};
 
 
 /** Input/Output Interface definitions available to developers.

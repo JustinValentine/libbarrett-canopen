@@ -32,6 +32,7 @@
  *      Author: dc
  */
 
+#include <cmath>
 #include <stdexcept>
 #include <limits>
 
@@ -65,8 +66,14 @@ void MotorPuck::setPuck(Puck* puck)
 		rpc = 2*M_PI / cts;
 		cpr = cts / (2*M_PI);
 
-		int ratedTorque_mNm = bus::CANopen::readRatedTorque(p->getBus(), p->getId());
-		ppnm = 1.0e6 / ratedTorque_mNm;  // (1000 permille/rated) * (1000 mNm/Nm)
+		if (bus::CANopen::isSensorOnly(p->getBus(), p->getId())) {
+			// A motorless sensing puck has no torque path; do not make
+			// bring-up depend on whatever its 0x6076 happens to hold.
+			ppnm = 0.0;
+		} else {
+			int ratedTorque_mNm = bus::CANopen::readRatedTorque(p->getBus(), p->getId());
+			ppnm = 1.0e6 / ratedTorque_mNm;  // (1000 permille/rated) * (1000 mNm/Nm)
+		}
 		ipnm = 0;
 	}
 }
@@ -84,11 +91,13 @@ void MotorPuck::sendPackedTorques(const bus::CommunicationsBus& bus, int groupId
 	}
 
 	// Torque quad (contract sections 6.1/6.2): four i16 little-endian
-	// per-mille-of-rated-torque slots.  Unused slots are zero, which is
-	// also the correct pad for quad B's reserved bytes 6-7.
+	// per-mille-of-rated-torque slots. Unused slots are zero. Quad B's
+	// bytes 6-7 command motor 8 on wam8g; they are not reserved padding.
+	// Round to nearest (contract section 5.2): floor() biased every
+	// command by -0.5 LSB and turned any value in (-1, 0) into -1.
 	for (int i = 0; i < 4; ++i) {
 		int permille = (i >= numTorques) ? 0
-				: (int)floor(math::saturate(pt[i], (double)MAX_TORQUE_PERMILLE));
+				: (int)std::lround(math::saturate(pt[i], (double)MAX_TORQUE_PERMILLE));
 		data[2*i]     = permille & 0xFF;
 		data[2*i + 1] = (permille >> 8) & 0xFF;
 	}
