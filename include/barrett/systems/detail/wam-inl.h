@@ -210,8 +210,8 @@ inline typename Wam<DOF>::jv_type Wam<DOF>::getJointVelocities() const
 		BARRETT_SCOPED_LOCK(getEmMutex());
 
 		// Return the filtered velocity, if available.
-		if (jvController1.feedbackInput.valueDefined()) {
-			return jvController1.feedbackInput.getValue();
+		if (jvFilter.hasExecutionManager()) {
+			return jvFilter.getOutput();
 		}
 	}
 

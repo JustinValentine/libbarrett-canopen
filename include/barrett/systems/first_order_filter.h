@@ -47,6 +47,7 @@ namespace systems {
 template<typename T, typename MathTraits = math::Traits<T> >
 class FirstOrderFilter : public SingleIO<T, T>, protected math::FirstOrderFilter<T,MathTraits> {
 public:
+	using math::FirstOrderFilter<T,MathTraits>::getOutput;
 	explicit FirstOrderFilter(const std::string& sysName = "FirstOrderFilter");
 	explicit FirstOrderFilter(const libconfig::Setting& setting, const std::string& sysName = "FirstOrderFilter");
 	virtual ~FirstOrderFilter() { this->mandatoryCleanUp(); }
