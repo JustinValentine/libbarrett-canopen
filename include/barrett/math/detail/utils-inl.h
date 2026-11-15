@@ -163,7 +163,7 @@ inline const Eigen::CwiseUnaryOp<
 
 inline double saturate(double x, double lowerLimit, double upperLimit)
 {
-	assert(lowerLimit < upperLimit);
+	assert(lowerLimit <= upperLimit);  // equal limits: a joint with no actuator
 
 	if (x > upperLimit) {
 		return upperLimit;

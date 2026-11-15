@@ -30,6 +30,7 @@ set(barrett_SOURCES
 	systems/ramp.cpp
 	systems/real_time_execution_manager.cpp
 	systems/system.cpp
+	systems/wam8g.cpp
 
 	thread/null_mutex.cpp
 

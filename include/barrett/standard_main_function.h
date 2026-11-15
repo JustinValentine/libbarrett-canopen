@@ -29,8 +29,13 @@
  *   - Calling the wam_main() function that the user is responsible for defining
  *   .
  * The behavior is appropriate for many applications, but there is no issue with writing a custom main() function.
+ * The eight-joint wam8g is a barrett::systems::Wam<8> and is passed to the same
+ * templated wam_main() with DOF = 8. Define BARRETT_SMF_WAM8G before including
+ * this header for a wam8g-only application that implements
+ * wam_main(..., barrett::systems::Wam8g&) instead; define BARRETT_SMF_NO_WAM8G
+ * for an application that cannot be built for DOF = 8.
  *
- * The wam_main() function must be able to accept a reference to both a 3-DOF, 4-DOF and a 7-DOF barrett::systems::Wam. 
+ * The wam_main() function must be able to accept a reference to a 3-DOF, 4-DOF, 7-DOF and 8-DOF barrett::systems::Wam.
  * If your code treats these two cases similarly, then define a templated function:
  * @include zero_torque.cpp
  *
@@ -52,6 +57,7 @@
 #include <barrett/exception.h>
 #include <barrett/products/product_manager.h>
 #include <barrett/systems/wam.h>
+#include <barrett/systems/wam8g.h>
 
 
 #ifdef BARRETT_SMF_VALIDATE_ARGS
@@ -64,6 +70,9 @@
 
 #ifndef BARRETT_SMF_NO_DECLARE
 	template<size_t DOF> int wam_main(int argc, char** argv, ::barrett::ProductManager& pm, ::barrett::systems::Wam<DOF>& wam);
+#ifdef BARRETT_SMF_WAM8G
+	int wam_main(int argc, char** argv, ::barrett::ProductManager& pm, ::barrett::systems::Wam8g& wam);
+#endif
 #endif
 
 #ifndef BARRETT_SMF_DONT_WAIT_FOR_SHIFT_ACTIVATE
@@ -103,11 +112,31 @@ int main(int argc, char** argv) {
 #endif
 
 	pm.waitForWam(false);
+#ifdef BARRETT_SMF_WAM8G
+	if (!pm.foundWam8g()) {
+		printf(">>> ERROR: This application requires a complete wam8g.\n");
+		return 1;
+	}
+#endif
+#ifdef BARRETT_SMF_NO_WAM8G
+	if (pm.foundWam8g()) {
+		printf(">>> ERROR: This application does not support wam8g.\n");
+		return 1;
+	}
+#endif
 	pm.wakeAllPucks();
 	// Waking the pucks may reset their position counters, so ask for the
 	// home position only afterwards.
 	pm.waitForWam(BARRETT_SMF_PROMPT_ON_ZEROING);
 	// TODO(JH): Rehab Update implement and test
+#ifdef BARRETT_SMF_WAM8G
+	return wam_main(argc, argv, pm, *pm.getWam8g(BARRETT_SMF_WAIT_FOR_SHIFT_ACTIVATE, BARRETT_SMF_WAM_CONFIG_PATH));
+#else
+#ifndef BARRETT_SMF_NO_WAM8G
+	if (pm.foundWam8g()) {
+		return wam_main(argc, argv, pm, *pm.getWam8g(BARRETT_SMF_WAIT_FOR_SHIFT_ACTIVATE, BARRETT_SMF_WAM_CONFIG_PATH));
+	} else
+#endif
 	if (pm.foundWam3()) {
 		return wam_main(argc, argv, pm, *pm.getWam3(BARRETT_SMF_WAIT_FOR_SHIFT_ACTIVATE, BARRETT_SMF_WAM_CONFIG_PATH));
 	} else if (pm.foundWam4()) {
@@ -118,6 +147,7 @@ int main(int argc, char** argv) {
 		printf(">>> ERROR: No WAM was found. Perhaps you have found a bug in ProductManager::waitForWam().\n");
 		return 1;
 	}
+#endif
 }
 
 

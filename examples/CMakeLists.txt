@@ -42,6 +42,7 @@ add_programs(
 	ex09_torque_control
 	ex10_haptics
 	ex11_master_master
+	wam8g_state
 )
 
 # ex04 uses the ncurses library

@@ -56,6 +56,7 @@
 #include <barrett/systems/abstract/system.h>
 #include <barrett/systems/real_time_execution_manager.h>
 #include <barrett/systems/wam.h>
+#include <barrett/systems/wam8g.h>
 #include <barrett/products/product_manager.h>
 
 #include <barrett/config.h>
@@ -68,7 +69,7 @@ const std::string ProductManager::DEFAULT_CONFIG_FILE = barrett::EtcPathRelative
 ProductManager::ProductManager(const char* configFile, bus::CommunicationsBus* _bus) :
 	config(), bus(_bus), deleteBus(false),
 	pucks(), wamPucks(MAX_WAM_DOF), handPucks(Hand::DOF),
-	sm(NULL), rtem(NULL), wam3(NULL), wam4(NULL), wam7(NULL), fts(NULL), hand(NULL), ghc(NULL)
+	sm(NULL), rtem(NULL), wam3(NULL), wam4(NULL), wam7(NULL), wam8g(NULL), fts(NULL), hand(NULL), ghc(NULL)
 {
 	int ret;
 
@@ -249,6 +250,11 @@ void ProductManager::enumerate()
 		wamFound = true;
 		logMessage("    7-DOF WAM%s%s") % (foundWam7Wrist() ? " (Wrist)" : "") % (foundWam7Gimbals() ? " (Gimbals)" : "");
 	}
+	if (foundWam8g()) {
+		noProductsFound = false;
+		wamFound = true;
+		logMessage("    WAM8g (8 measured, 7 active joints; passive J5)");
+	}
 	if (wamFound) {
 		if (foundSafetyModule()) {
 			logMessage("    Safety Module");
@@ -287,6 +293,8 @@ void ProductManager::destroyEstopProducts()
 	wam4 = NULL;
 	delete wam7;
 	wam7 = NULL;
+	delete wam8g;
+	wam8g = NULL;
 	delete fts;
 	fts = NULL;
 	delete hand;
@@ -305,6 +313,9 @@ int ProductManager::expectedPuckMask() const
 	const int mask = config.lookup("bus.expected_puck_mask");
 	if (mask <= 0 || (mask & ~0x01FE) != 0) {
 		throw std::invalid_argument("bus.expected_puck_mask must contain only puck-node bits 1-8 and must not be empty.");
+	}
+	if (mask == 0x01FE && !config.exists("wam8g")) {
+		throw std::invalid_argument("bus.expected_puck_mask declares eight pucks, which requires the wam8g profile.");
 	}
 	return mask;
 }
@@ -343,8 +354,9 @@ void ProductManager::wakeAllPucks() const
 	if (!foundSafetyModule()) {
 		throw std::runtime_error("ProductManager::wakeAllPucks(): no safety board; startup stopped.");
 	}
-	// Tell the safety board which pucks to watch.  None is sensor-only.
-	const int mask = 0;
+	// Tell the safety board which pucks to watch, and both it and the wake
+	// path which of them are sensor-only (the wam8g's passive J5).
+	const int mask = foundWam8g() ? (1 << 5) : 0;
 	bus::CANopen::configureSafetyNodes(*bus, required, mask);
 	bus::CANopen::setSensorOnlyNodes(*bus, mask);
 	bus::CANopen::validateWamEncoders(*bus);
@@ -412,6 +424,10 @@ bool ProductManager::foundWam7() const
 {
 	return verifyWamPucks(7);
 }
+bool ProductManager::foundWam8g() const
+{
+	return config.exists("wam8g") && verifyWamPucks(8);
+}
 bool ProductManager::foundWam7Wrist() const
 {
 	return wam7FoundHelper(6);
@@ -462,7 +478,9 @@ void ProductManager::waitForWam(bool promptOnZeroing)
 const char* ProductManager::getWamDefaultConfigPath()
 {
 	// TODO(JH): Rehab Update implement and test
-	if (foundWam3()){
+	if (foundWam8g()) {
+		return "wam8g";
+	} else if (foundWam3()){
 		return "wam3";
 	} else if (foundWam4()) {
 		return "wam4";
@@ -624,6 +642,47 @@ systems::Wam<7>* ProductManager::getWam7(bool waitForShiftActivate, const char* 
 	return wam7;
 }
 
+systems::Wam8g* ProductManager::getWam8g(bool waitForShiftActivate, const char* configPath)
+{
+	if (!foundSafetyModule()) {
+		throw std::logic_error("ProductManager::getWam8g(): no safety board was found.");
+	}
+	if (!foundWam8g()) {
+		throw std::logic_error("ProductManager::getWam8g(): no complete WAM8g was found.");
+	}
+	if (wam3 != NULL || wam4 != NULL || wam7 != NULL) {
+		throw std::logic_error("ProductManager::getWam8g(): nodes already owned by another product; clean up before changing profiles.");
+	}
+	if (wam8g == NULL) {
+		if (configPath == NULL) {
+			configPath = getWamDefaultConfigPath();
+		}
+		try {
+			wam8g = new systems::Wam8g(getExecutionManager(), wamPucks, getSafetyModule(), getConfig().lookup(configPath));
+		} catch (libconfig::FileIOException e) {
+			printf("\n>>> CONFIG FILE ERROR in %s: I/O while reading file\n\n", configPath);
+			printf("Check your configuration file directory to ensure that the proper configuration files are installed.\n");
+			printf("Note that if a ~/.barrett/ directory exists, this location will override the standard /etc/barrett/.\n\n");
+			throw e;
+		} catch (libconfig::SettingNotFoundException e) {
+			printf("\n>>> CONFIG FILE ERROR in %s: could not find \"%s\"\n\n", configPath, e.getPath());
+			printf("Check your configuration file directory to ensure that the proper configuration files are installed.\n");
+			printf("Note that if a ~/.barrett/ directory exists, this location will override the standard /etc/barrett/.\n\n");
+			throw e;
+		} catch (libconfig::SettingTypeException e) {
+			printf("\n>>> CONFIG FILE ERROR in %s: \"%s\" is the wrong type\n\n", configPath, e.getPath());
+			printf("Check your configuration file directory to ensure that the proper configuration files are installed.\n");
+			printf("Note that if a ~/.barrett/ directory exists, this location will override the standard /etc/barrett/.\n\n");
+			throw e;
+		}
+		startExecutionManager();
+	}
+	if (waitForShiftActivate) {
+		getSafetyModule()->waitForMode(SafetyModule::ACTIVE, true, 0.05);
+	}
+	return wam8g;
+}
+
 systems::RealTimeExecutionManager* ProductManager::getExecutionManager(double period_s, int rt_priority)
 {
 	if (rtem == NULL) {
@@ -675,7 +734,7 @@ Hand* ProductManager::getHand()
 
 bool ProductManager::foundGimbalsHandController() const
 {
-	return wamPucks[5] != NULL  &&  wamPucks[6] != NULL  &&  !foundWam7Wrist();
+	return !foundWam8g() && wamPucks[5] != NULL  &&  wamPucks[6] != NULL  &&  !foundWam7Wrist();
 }
 GimbalsHandController* ProductManager::getGimbalsHandController()
 {
