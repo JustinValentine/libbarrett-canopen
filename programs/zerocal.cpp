@@ -147,6 +147,63 @@ protected:
 	std::string title;
 };
 
+// Measures which way each P4's single-turn encoder (0x3012:01) counts
+// relative to its position counter (0x6064), which zero compensation needs:
+// a reading at rest before the arm moves is compared with later readings
+// at rest.
+template<size_t DOF>
+class SingleTurnSurvey {
+public:
+	explicit SingleTurnSurvey(const LowLevelWam<DOF>& llw_) : llw(llw_) {
+		for (size_t i = 0; i < DOF; ++i) {
+			dir[i] = 0;
+			conflict[i] = false;
+			haveStart[i] = read(i, &startPosition[i], &startSingleTurn[i]);
+		}
+	}
+
+	// Read motor i at rest and update its direction from the motion since the
+	// start.  Returns the single-turn reading, or -1 if it was not at rest.
+	int sample(size_t i) {
+		int position = 0, singleTurn = 0;
+		if ( !read(i, &position, &singleTurn) ) {
+			return -1;
+		}
+		if (haveStart[i]) {
+			const int d = bus::CANopen::singleTurnDirection(
+					position - startPosition[i], singleTurn - startSingleTurn[i]);
+			if (d != 0  &&  dir[i] == 0) {
+				dir[i] = d;
+			} else if (d != 0  &&  d != dir[i]) {
+				conflict[i] = true;
+			}
+		}
+		return singleTurn;
+	}
+
+	// +1 or -1; 0 if the motor never turned enough to tell, or if the
+	// readings disagreed (its counter does not track the encoder).
+	int direction(size_t i) const { return conflict[i] ? 0 : dir[i]; }
+	bool disagreed(size_t i) const { return conflict[i]; }
+	bool started(size_t i) const { return haveStart[i]; }
+
+protected:
+	bool read(size_t i, int* position, int* singleTurn) const {
+		const Puck& puck = *llw.getPucks()[i];
+		for (int attempt = 0; attempt < 10; ++attempt) {
+			if (bus::CANopen::readCounterAndSingleTurn(puck.getBus(), puck.getId(), position, singleTurn)) {
+				return true;
+			}
+			btsleep(0.05);
+		}
+		return false;
+	}
+
+	const LowLevelWam<DOF>& llw;
+	int dir[DOF], startPosition[DOF], startSingleTurn[DOF];
+	bool conflict[DOF], haveStart[DOF];
+};
+
 // Handles actions an displays associated with adjusting the angle of a
 // particular joint.
 template<size_t DOF>
@@ -158,11 +215,11 @@ class AdjustJointStep : public CalibrationStep {
 	static const int MIN_DIGIT = -3;  // ... through thousandth's.
 
 public:
-	explicit AdjustJointStep(const libconfig::Setting& setting, systems::Wam<DOF>* wamPtr, jp_type* calOffsetPtr, jp_type* zeroPosPtr, v_type* zeroAnglePtr) :
+	explicit AdjustJointStep(const libconfig::Setting& setting, systems::Wam<DOF>* wamPtr, jp_type* calOffsetPtr, jp_type* zeroPosPtr, v_type* zeroAnglePtr, SingleTurnSurvey<DOF>* surveyPtr) :
 		CalibrationStep("Joint " + boost::lexical_cast<std::string>((int)setting[0])),
 		j((int)setting[0] - 1), calPos(setting[1]), endCondition(setting[2].c_str()),
 		wam(*wamPtr), calOffset(*calOffsetPtr), zeroPos(*zeroPosPtr), zeroAngle(*zeroAnglePtr),
-		state(0), digit(DEFAULT_DIGIT)
+		survey(*surveyPtr), state(0), digit(DEFAULT_DIGIT)
 	{
 		assert(j >= 0);
 		assert(j < DOF);
@@ -170,6 +227,7 @@ public:
 		assert(calOffsetPtr != NULL);
 		assert(zeroPosPtr != NULL);
 		assert(zeroAnglePtr != NULL);
+		assert(surveyPtr != NULL);
 	}
 	virtual ~AdjustJointStep() {}
 
@@ -233,6 +291,10 @@ public:
 							zeroAngle[i] = llw.getMotorPucks()[i].counts2rad(mech);
 						}
 					}
+					// Every motor: a pose may also move other joints.
+					for (size_t i = 0; i < DOF; ++i) {
+						survey.sample(i);
+					}
 
 					// Log joint encoder data for factory calibration
 					if (llw.hasJointEncoders()) {
@@ -280,7 +342,7 @@ public:
 
 			// Adjust the offset
 			default:
-				mvprintw(line++,left, "Use arrow keys to adjust the Joint %d offset.", j+1);
+				mvprintw(line++,left, "Use arrow keys to adjust the Joint %d offset.", (int)j+1);
 				sa.off();
 				line++;
 				mvprintw(line++,left, "                 ");
@@ -317,12 +379,18 @@ protected:
 	jp_type& calOffset;
 	jp_type& zeroPos;
 	v_type& zeroAngle;
+	SingleTurnSurvey<DOF>& survey;
 
 	int state, digit;
 
 public:
 	EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
+
+// Definitions for std::min/max, which take them by reference.
+template<size_t DOF> const int AdjustJointStep<DOF>::DEFAULT_DIGIT;
+template<size_t DOF> const int AdjustJointStep<DOF>::MAX_DIGIT;
+template<size_t DOF> const int AdjustJointStep<DOF>::MIN_DIGIT;
 
 // The Exit menu item.
 class ExitStep : public CalibrationStep {
@@ -361,6 +429,9 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam) 
 	wam.jpController.setControlSignalLimit(jp_type());
 	wam.moveTo(wam.getJointPositions());  // Hold position
 
+	// Take the first encoder readings before anything moves.
+	SingleTurnSurvey<DOF> survey(wam.getLowLevelWam());
+
 
 	// Read from config
 	std::vector<CalibrationStep*> steps;
@@ -373,7 +444,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam) 
 
 		for (size_t i = 0; i < DOF; ++i) {
 			// Populate the menu
-			steps.push_back(new AdjustJointStep<DOF>(setting[i], &wam, &calOffset, &zeroPos, &zeroAngle));
+			steps.push_back(new AdjustJointStep<DOF>(setting[i], &wam, &calOffset, &zeroPos, &zeroAngle, &survey));
 		}
 	} catch (libconfig::ParseException e) {
 		printf(">>> CONFIG FILE ERROR on line %d of %s: \"%s\"\n", e.getLine(), CAL_CONFIG_FILE.c_str(), e.getError());
@@ -480,6 +551,21 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam) 
 	if (done) {
 		printf(">>> Calibration completed!\n");
 
+		// Zero compensation data: read every motor once more at rest and,
+		// where the encoder's direction is known, compute its angle at the
+		// joint-zero pose from the actual joint angles.
+		LowLevelWam<DOF>& llw = wam.getLowLevelWam();
+		v_type zeroAngleDir(0.0);
+		for (size_t i = 0; i < DOF; ++i) {
+			const int singleTurn = survey.sample(i);
+			const int d = survey.direction(i);
+			if (singleTurn >= 0  &&  d != 0) {
+				const jp_type fromZero(wam.getJointPositions() - zeroPos);
+				zeroAngle[i] = llw.singleTurnAtZero(i, llw.getMotorPucks()[i].counts2rad(singleTurn), fromZero, d);
+				zeroAngleDir[i] = d;
+			}
+		}
+
 		char* dataConfigFile = new char[strlen(DATA_CONFIG_FILE.c_str()) + strlen(pm.getWamDefaultConfigPath()) - 2 + 1];
 		sprintf(dataConfigFile, DATA_CONFIG_FILE.c_str(), pm.getWamDefaultConfigPath());
 		manageBackups(dataConfigFile);  // Backup old calibration data
@@ -490,15 +576,47 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam) 
 		libconfig::Config dataConfig;
 		libconfig::Setting& homeSetting = dataConfig.getRoot().add("home", libconfig::Setting::TypeList);
 		libconfig::Setting& zaSetting = dataConfig.getRoot().add("zeroangle", libconfig::Setting::TypeList);
+		libconfig::Setting& zdSetting = dataConfig.getRoot().add("zeroangle_dir", libconfig::Setting::TypeList);
 		for (size_t i = 0; i < DOF; ++i) {
 			homeSetting.add(libconfig::Setting::TypeFloat) = newHome[i];
 			zaSetting.add(libconfig::Setting::TypeFloat) = zeroAngle[i];
+			zdSetting.add(libconfig::Setting::TypeFloat) = zeroAngleDir[i];
 		}
 
 		dataConfig.writeFile(dataConfigFile);
 		printf(">>> Data written to: %s\n", dataConfigFile);
 
 		delete[] dataConfigFile;
+
+		// Report which joints can use zero compensation.
+		const sqm_type& m2jp = llw.getMotorToJointPositionTransform();
+		const double tolerance = m2jp.cwiseAbs().maxCoeff() * 1e-5;
+		std::string rough, exact;
+		for (size_t j = 0; j < DOF; ++j) {
+			bool measured = true;
+			for (size_t i = 0; i < DOF; ++i) {
+				if (math::abs(m2jp(j,i)) > tolerance  &&  zeroAngleDir[i] == 0.0) {
+					measured = false;
+				}
+			}
+			std::string& list = measured ? rough : exact;
+			list += (list.empty() ? "J" : ", J") + boost::lexical_cast<std::string>(j + 1);
+		}
+		printf(">>> Rough placement at power-up (within half a motor turn of home): %s.\n",
+				rough.empty() ? "no joints" : rough.c_str());
+		if ( !exact.empty()) {
+			printf("    Place exactly at home, e.g. on a stop or pin: %s. Their motors did not\n"
+					"    turn enough during this calibration to measure their encoders.\n", exact.c_str());
+		}
+		for (size_t i = 0; i < DOF; ++i) {
+			const int id = llw.getPucks()[i]->getId();
+			if ( !survey.started(i)) {
+				printf("    Puck %d could not be read at rest when the calibration started.\n", id);
+			} else if (survey.disagreed(i)) {
+				printf("    Puck %d: its position counter did not track its single-turn encoder,\n"
+						"    so it is not used for rough placement.\n", id);
+			}
+		}
 
 
 		// Move home!
@@ -567,7 +685,15 @@ int main(int argc, char** argv) {
 		llSetting.remove(llSetting["zeroangle"].getIndex());
 		syslog(LOG_ERR, "** Ignoring previous \"zeroangle\" vector **");
 	}
+	if (llSetting.exists("zeroangle_dir")) {
+		llSetting.remove(llSetting["zeroangle_dir"].getIndex());
+	}
 
+	if (sm->getPuck()->getVers() >= bus::CANopen::SB_CANOPEN_VERS) {
+		printf(">>> CANopen WAM: this calibration also measures each P4's single-turn encoder.\n"
+				"    Afterwards, power-up needs the WAM only roughly at home (within half a\n"
+				"    motor turn) at every joint whose motors turn during the calibration.\n");
+	}
 	printf(">>> Please *carefully* place the WAM in its home position, then press [Enter].");
 	waitForEnter();
 
