@@ -40,6 +40,48 @@
 
 #ifdef BARRETT_XENOMAI
 	#include "real_time_mutex_impl-xenomai.cpp"
+#elif defined(__linux__)
+	#include <pthread.h>
+	#include <cerrno>
+	#include <system_error>
+
+	namespace barrett {
+	namespace thread {
+	namespace detail {
+		class mutex_impl {
+		public:
+			mutex_impl() {
+				pthread_mutexattr_t attr;
+				check(pthread_mutexattr_init(&attr));
+				try {
+					check(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE));
+					check(pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT));
+					check(pthread_mutex_init(&mutex, &attr));
+				} catch (...) {
+					pthread_mutexattr_destroy(&attr);
+					throw;
+				}
+				pthread_mutexattr_destroy(&attr);
+			}
+			~mutex_impl() { pthread_mutex_destroy(&mutex); }
+			void lock() { check(pthread_mutex_lock(&mutex)); }
+			void unlock() { check(pthread_mutex_unlock(&mutex)); }
+			bool try_lock() {
+				const int ret = pthread_mutex_trylock(&mutex);
+				if (ret == EBUSY) return false;
+				check(ret);
+				return true;
+			}
+		private:
+			static void check(int ret) {
+				if (ret != 0) throw std::system_error(ret, std::generic_category(),
+						"RealTimeMutex (recursive, priority inheritance)");
+			}
+			pthread_mutex_t mutex;
+		};
+	}
+	}
+	}
 #else
 	#include <boost/thread/recursive_mutex.hpp>
 

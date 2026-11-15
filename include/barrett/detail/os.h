@@ -42,6 +42,11 @@
 namespace barrett {
 namespace detail {
 
+// Native Linux: give the calling thread SCHED_FIFO at this priority and lock
+// the process's memory.  Priority 0 does nothing (for tests without real-time
+// rights).  Under Xenomai, PeriodicLoopTimer sets up the task instead.
+void configureRealtimeThread(int priority);
+
 
 class LogFormatter : public boost::format {
 public:
