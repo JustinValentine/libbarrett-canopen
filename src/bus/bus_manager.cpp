@@ -68,42 +68,26 @@ BusManager::~BusManager()
 
 int BusManager::receive(int expectedBusId, unsigned char* data, size_t& len, bool blocking, bool realtime) const
 {
-	thread::Mutex& m = getMutex();
-	m.lock();
-
-	double start = highResolutionSystemTime();
-
-	if (retrieveMessage(expectedBusId, data, len)) {
-		m.unlock();
-		return 0;
-	}
-
-	int ret;
+	const double start = highResolutionSystemTime();
 	while (true) {
-		ret = updateBuffers();
-		if (ret != 0) {
-			m.unlock();
-			return ret;
-		} else if (retrieveMessage(expectedBusId, data, len)) {
-			m.unlock();
-			return 0;
-		} else if (!blocking) {
-			m.unlock();
-			return 1;
+		{
+			// Hold the I/O mutex for one non-blocking pass only, so a
+			// caller waiting for a reply cannot stall the cyclic traffic.
+			BARRETT_SCOPED_LOCK(getMutex());
+			if (retrieveMessage(expectedBusId, data, len)) return 0;
+			const int ret = updateBuffers();
+			if (ret != 0) return ret;
+			if (retrieveMessage(expectedBusId, data, len)) return 0;
+			if (!blocking) return 1;
 		}
 
 		double now = highResolutionSystemTime();
 		if ((now - start) > CommunicationsBus::TIMEOUT) {
-			m.unlock();
 			logMessage("BusManager::receive(): timed out. Now: %lf, Start: %lf", true) %now %start;
 			return 2;
 		}
 
-		//if (!realtime) {
-		//	int lc = m.fullUnlock();
-		//	btsleepRT(0.0001);			// Yield this thread, give CAN thread time to process data
-		//	m.relock(lc);
-		//}
+		if (!realtime) btsleepRT(0.0001);
 	}
 }
 
@@ -120,7 +104,7 @@ int BusManager::updateBuffers() const
 	while (true) {
 		ret = receiveRaw(busId, data, len, false);  // non-blocking read
 		if (ret == 0) {  // successfully received a message
-			if (busId != 1344) storeMessage(busId, data, len); // disregard safetyboard broadcast message
+			storeMessage(busId, data, len);  // buffers are keyed by COB-ID
 		} else if (ret == 1) {  // would block
 			return 0;
 		} else {  // error
@@ -131,9 +115,9 @@ int BusManager::updateBuffers() const
 
 void BusManager::storeMessage(int busId, const unsigned char* data, size_t len) const
 {
-	if (messageBuffers[busId].full()) {
-		(logMessage("BusManager::%s: Buffer overflow. ID = %d",true) %__func__ %busId).raise<std::runtime_error>();
-	}
+	// The buffers are rings: a full one drops its oldest entry.  CANopen
+	// carries periodic traffic nobody may be reading (statuswords,
+	// heartbeats, EMCYs), so overflow is not an error.
 	messageBuffers[busId].push_back(Message(data, len));
 }
 

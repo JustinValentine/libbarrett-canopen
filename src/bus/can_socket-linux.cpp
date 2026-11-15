@@ -109,15 +109,8 @@ void CANSocket::open(int port)
 	sprintf(devname, "can%d", port);
 	strncpy(ifr.ifr_name, devname, IFNAMSIZ);
 
-	struct can_filter recvFilter[1];
-	recvFilter[0].can_id = (Puck::HOST_ID << Puck::NODE_ID_WIDTH) | CAN_INV_FILTER;
-	recvFilter[0].can_mask = Puck::FROM_MASK;
-	ret = setsockopt(handle->h, SOL_CAN_RAW, CAN_RAW_FILTER, &recvFilter, sizeof(recvFilter));
-	if (ret != 0) {
-		close();
-		(logMessage("CANSocket::%s(): Could not open CAN port. setsockopt(CAN_RAW_FILTER): (%d) %s")
-				% __func__ % -ret % strerror(-ret)).raise<std::runtime_error>();
-	}
+	// No receive filter: CANopen identifiers have no sender field to filter
+	// on, and SocketCAN does not return a socket's own frames to it.
 
 	// Note: This must be done after the ioctl(SIOCGCANSTATE) call above,
 	// otherwise send() will fail with ret = -6 (No such device or

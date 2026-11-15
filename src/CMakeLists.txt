@@ -1,6 +1,7 @@
 # Always compile these files
 set(barrett_SOURCES
 	bus/bus_manager.cpp
+	bus/canopen.cpp
 	bus/communications_bus.cpp
 	
 	cdlbt/calgrav.c
