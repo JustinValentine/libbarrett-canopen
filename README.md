@@ -5,6 +5,13 @@ Technology products (WAM and BarrettHand)
 ` This version of Libbarrett works with a non-real-time kernel (a low-latency Ubuntu 20.04 kernel) and should only be used when a hard real-time guarantee is not critical for your application.`
 
 
+### CANopen WAMs
+This version of libbarrett drives WAMs that use P4 pucks and a safety board running the CANopen firmware. It does not support BarrettCAN (P2/P3 pucks).
+
+ - [doc/canopen.md](doc/canopen.md): requirements, what the library does on the bus, zeroing and configuration
+ - [doc/wam8g.md](doc/wam8g.md): the eight-joint WAM with a wrist
+ - [P4-WAM-Setup](https://github.com/JustinValentine/P4-WAM-Setup): safety-board firmware, puck calibration and the checks for setting up an arm
+
 ### Download package
 ```
 cd && git clone https://git.barrett.com/software/libbarrett

@@ -4,6 +4,13 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+- CANopen support for WAMs with P4 pucks and the CANopen safety board, replacing BarrettCAN (see doc/canopen.md)
+- The WAM zero is kept across program runs, and zero compensation uses the P4's single-turn encoder
+- wam8g: a 4-DOF WAM with a passive joint and a three-motor wrist (see doc/wam8g.md)
+- Optional fixed theta offsets in DH kinematics
+- Linux: SCHED_FIFO control thread, priority-inheritance mutexes and a monotonic clock
+- Builds against stock libconfig
+- Added a DH viewer (scripts/visualize_dh.py)
 - Added wamudpd script that makes PCs findable by the wamdiscover script.
 - Updated wamudpd script to run using python3
 
