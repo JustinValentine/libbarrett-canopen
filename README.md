@@ -2,7 +2,7 @@
 > Libbarrett is a real-time controls library written in C++ that runs Barrett
 Technology products (WAM and BarrettHand)
 
-` This version of Libbarrett runs on a standard Linux kernel instead of Xenomai. The control loop is a SCHED_FIFO thread with locked memory, so use a real-time (PREEMPT_RT) or low-latency kernel. It builds on Ubuntu 20.04, 22.04 and 24.04.`
+` This version of Libbarrett works with a non-real-time kernel (a low-latency Ubuntu kernel; it builds on 20.04, 22.04 and 24.04) and should only be used when a hard real-time guarantee is not critical for your application.`
 
 
 ### CANopen WAMs
