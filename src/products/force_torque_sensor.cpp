@@ -61,7 +61,7 @@ void ForceTorqueSensor::update(bool realtime)
 {
 	int ret;
 
-	BARRETT_SCOPED_LOCK(bus->getMutex());
+	BARRETT_SCOPED_LOCK(bus->getSdoMutex());
 
 	ret = Puck::sendGetPropertyRequest(*bus, id, propId);
 	if (ret != 0) {
@@ -96,7 +96,7 @@ void ForceTorqueSensor::updateAccel(bool realtime)
 	// TODO(dc): Fix this once FT sensors have working ROLE/VERS properties.
 	int accelPropId = Puck::getPropertyId(Puck::A, Puck::PT_ForceTorque, 0);
 
-	BARRETT_SCOPED_LOCK(bus->getMutex());
+	BARRETT_SCOPED_LOCK(bus->getSdoMutex());
 	ret = Puck::sendGetPropertyRequest(*bus, id, accelPropId);
 	if (ret != 0) {
 		(logMessage("ForceTorqueSensor::%s(): Failed to send request. "

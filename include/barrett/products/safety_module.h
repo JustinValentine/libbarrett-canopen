@@ -36,6 +36,7 @@
 
 #include <string>
 
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/abstract/special_puck.h>
 
@@ -61,6 +62,9 @@ public:
 	 *
 	 */
 	enum SafetyMode getMode(bool realtime = false) const;
+	/** getMode() for polling loops: retries a few lost SDO exchanges
+	    (logging each) before it rethrows. */
+	enum SafetyMode pollMode() const;
 	/** waitForMode Method
 	 *
 	 */
@@ -84,14 +88,23 @@ public:
 	void setMode(enum SafetyMode mode) { p->setProperty(Puck::MODE, mode); }
 	/** wamIsZeroed Method returns true/false flag that wam has been zeroed by user.
 	 *
+	 *  On a CANopen board, true means the board still holds the zero of an
+	 *  earlier run (see hasZeroRecord()); its ZERO flag stays 0.
 	 */
-	bool wamIsZeroed() const { return p->getProperty(Puck::ZERO) == 1; }
-	/** setWamZeroed Method 
+	bool wamIsZeroed() const;
+	/** setWamZeroed Method
 	 *
+	 *  On a CANopen board, setWamZeroed(false) clears the stored zero and
+	 *  setWamZeroed(true) does nothing: ZERO = 1 would switch the board to
+	 *  its Cartesian velocity model, which needs absolute puck positions.
 	 */
-	void setWamZeroed(bool zeroed = true) const {
-		p->setProperty(Puck::ZERO, zeroed);
-	}
+	void setWamZeroed(bool zeroed = true) const;
+	/** The board can hold the host's WAM zero across program runs
+	 *  (CANopen firmware r209+, object 0x2103). */
+	bool hasZeroRecord() const { return p->getVers() >= bus::CANopen::SB_ZERO_RECORD_VERS; }
+	/** wamIsZeroed() has returned true in this process, so the operator was
+	 *  not asked to move the WAM home. */
+	bool zeroWasKept() const { return zeroKept; }
 	/**	ignoreNextVelocityFault Method overrides next velocity fault. 
 	 *
 	 */
@@ -145,6 +158,7 @@ protected:
 
 private:
 	static const char safetyModeStrs[][15];
+	mutable bool zeroKept;
 };
 
 

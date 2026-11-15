@@ -103,13 +103,25 @@ public:
 	const bus::CommunicationsBus& getBus() const { return bus; }
 	int getId() const { return id; }
 	int getVers() const { return vers; }
+	/** A P4's identity revision (0x1018:03); not a BarrettCAN firmware
+	    version, see CANOPEN_PUCK_VERS.  -1 for the safety board. */
+	int getIdentityRevision() const { return identityRevision; }
 	int getRole() const { return role; }
 	bool hasOption(enum RoleOption ro) const { return role & ro; }
 	enum PuckType getType() const { return type; }
 	enum PuckType getEffectiveType() const { return effectiveType; }
+	/** wake() has configured this puck since the last enumeration. */
+	bool isAwake() const { return awake; }
+	void setAwake(bool a) { awake = a; }
 
 
-	static void wake(std::vector<Puck*> pucks);
+	/** Bring up every motor puck that is not awake yet: NMT reset, PDO
+	    configuration in pre-operational, NMT start, CST mode selection.
+	    resetFirst = false keeps the position counters running: the pucks
+	    are only reconfigured and no drive is enabled.  That requires every
+	    drive to still be in CST mode and disabled; otherwise they are reset
+	    anyway. */
+	static void wake(std::vector<Puck*> pucks, bool resetFirst = true);
 
 	static int getProperty(const bus::CommunicationsBus& bus, int id, int propId, bool realtime = false);
 	template<typename Parser> static void getProperty(
@@ -122,6 +134,7 @@ public:
 	static void setProperty(const bus::CommunicationsBus& bus, int id, int propId,
 			int value, bool blocking = false);
 
+	// Hold bus.getSdoMutex() across a split request and its reply.
 	static int sendGetPropertyRequest(const bus::CommunicationsBus& bus, int id, int propId);
 	static int receiveGetPropertyReply(const bus::CommunicationsBus& bus, int id, int propId,
 			int* result, bool blocking, bool realtime);
@@ -164,6 +177,17 @@ public:
 	static const int SET_MASK = 0x80;
 	static const int PROPERTY_MASK = 0x7f;
 
+	/* Map a numeric property id to an object-dictionary entry and transfer
+	   size.  The safety board serves every property p at 0x2000 + p
+	   (contract section 4.2); motor pucks have CiA-402 equivalents for a
+	   few.  Returns false if the node has no object for the property. */
+	static bool propToOd(int id, int propId, int* index, int* sub, int* nbytes);
+
+	/* The vers assigned to P4 pucks, so that property_list.cpp uses its
+	   current (r197) property numbering, which propToOd() decodes, and the
+	   products' firmware-version checks pass. */
+	static const int CANOPEN_PUCK_VERS = 200;
+
 	static constexpr double WAKE_UP_TIME = 1.0;  // seconds
 	static constexpr double TURN_OFF_TIME = 0.01;  // seconds
 
@@ -196,7 +220,9 @@ protected:
 	const bus::CommunicationsBus& bus;
 	int id;
 	int vers, role;
+	int identityRevision;  // 0x1018:03, -1 if not read
 	enum PuckType type, effectiveType;
+	bool awake;
 
 private:
 	template<typename Parser>

@@ -37,6 +37,7 @@
 #include <boost/tuple/tuple.hpp>
 
 #include <barrett/bus/abstract/communications_bus.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/math/utils.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/abstract/special_puck.h>
@@ -58,7 +59,8 @@ public:
 
 
 	MotorPuck(Puck* puck = NULL) :
-		SpecialPuck(Puck::PT_Motor), cts(0), rpc(0.0), cpr(0.0), ipnm(0) { setPuck(puck); }
+		SpecialPuck(Puck::PT_Motor), cts(0), rpc(0.0), cpr(0.0), ipnm(0),
+		ppnm(0.0) { setPuck(puck); }
 	~MotorPuck() {}
 
 	void setPuck(Puck* puck);
@@ -72,11 +74,17 @@ public:
 	int getIpnm() const { return ipnm; }
 	int nm2i(double torque) const { return floor(math::saturate(torque*ipnm, MAX_PUCK_TORQUE)); }
 
+	/** Torque scale: per-mille of rated torque (0x6076) per Nm. */
+	double getPermillePerNm() const { return ppnm; }
+
 	bool foundIndexPulse() const {
 		return (p->getProperty(Puck::ECMIN) != 0)  ||  (p->getProperty(Puck::ECMAX) != 0);
 	}
 
 
+	/** Send one torque quad (contract sections 6.1/6.2): four 16-bit
+	    per-mille torques on COB-ID groupId (0x201 or 0x205); unused slots
+	    are zero.  propId is ignored. */
 	static void sendPackedTorques(const bus::CommunicationsBus& bus, int groupId, int propId,
 			const double* pt, int numTorques);
 
@@ -84,11 +92,15 @@ public:
 	static const size_t PUCKS_PER_TORQUE_GROUP = 4;
 	static const int MAX_PUCK_TORQUE = 8191;
 
+	/** Saturation bound for per-mille torque commands: 300% of rated
+	    torque.  Provisional. */
+	static const int MAX_TORQUE_PERMILLE = 3000;
+
 
 	template<typename ResultType>
 	struct MotorPositionParser {
 		static int busId(int id, int propId) {
-			return Puck::encodeBusId(id, PuckGroup::FGRP_MOTOR_POSITION);
+			return bus::CANopen::COB_TPDO1_BASE + id;  // sent on every SYNC
 		}
 
 		typedef ResultType result_type;
@@ -118,6 +130,7 @@ protected:
 	int cts;
 	double rpc, cpr;
 	int ipnm;
+	double ppnm;  // per-mille of rated torque per Nm
 
 private:
 	template<typename ResultType>

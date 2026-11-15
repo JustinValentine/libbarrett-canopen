@@ -49,7 +49,7 @@ namespace barrett {
 
 
 SafetyModule::SafetyModule(Puck* puck) :
-	SpecialPuck(Puck::PT_Safety)
+	SpecialPuck(Puck::PT_Safety), zeroKept(false)
 {
 	setPuck(puck);
 
@@ -68,9 +68,26 @@ enum SafetyModule::SafetyMode SafetyModule::getMode(bool realtime) const {
 	return static_cast<enum SafetyMode>(mode);
 }
 
+enum SafetyModule::SafetyMode SafetyModule::pollMode() const
+{
+	const int MAX_CONSECUTIVE_FAILURES = 3;
+	for (int attempt = 1; ; ++attempt) {
+		try {
+			return getMode();
+		} catch (const std::runtime_error& e) {
+			if (attempt >= MAX_CONSECUTIVE_FAILURES) {
+				throw;
+			}
+			logMessage("SafetyModule::%s(): safety-board MODE poll %d of %d "
+					"failed (%s); retrying.", true)
+					% __func__ % attempt % MAX_CONSECUTIVE_FAILURES % e.what();
+		}
+	}
+}
+
 void SafetyModule::waitForMode(enum SafetyMode mode, bool printMessage, double pollingPeriod_s)
 {
-	if (getMode() == mode) {
+	if (pollMode() == mode) {
 		return;
 	}
 
@@ -79,20 +96,50 @@ void SafetyModule::waitForMode(enum SafetyMode mode, bool printMessage, double p
 	}
 	do {
 		btsleep(pollingPeriod_s);
-	} while (getMode() != mode);
+	} while (pollMode() != mode);
 }
 
 enum SafetyModule::SafetyMode SafetyModule::waitForModeChange(double pollingPeriod_s)
 {
-	const enum SafetyMode originalMode = getMode();
+	const enum SafetyMode originalMode = pollMode();
 	enum SafetyMode currentMode;
 
 	do {
 		btsleep(pollingPeriod_s);
-		currentMode = getMode();
+		currentMode = pollMode();
 	} while (currentMode == originalMode);
 
 	return currentMode;
+}
+
+bool SafetyModule::wamIsZeroed() const
+{
+	if (p->getVers() < bus::CANopen::SB_CANOPEN_VERS) {
+		return p->getProperty(Puck::ZERO) == 1;
+	}
+	// CANopen: the host keeps the zero.  Before r209 the board cannot
+	// store it, so every run zeroes the WAM again.
+	if ( !hasZeroRecord()  ||  bus::CANopen::zeroRecordNodes(p->getBus()) == 0) {
+		return false;
+	}
+	zeroKept = true;
+	return true;
+}
+
+void SafetyModule::setWamZeroed(bool zeroed) const
+{
+	if (p->getVers() >= bus::CANopen::SB_CANOPEN_VERS) {
+		if (zeroed) {
+			logMessage("SafetyModule::%s(): CANopen safety board - ZERO stays 0 "
+					"(the host keeps the WAM zero).") % __func__;
+			return;
+		}
+		if (hasZeroRecord()) {
+			bus::CANopen::clearZeroRecord(p->getBus());
+			zeroKept = false;
+		}
+	}
+	p->setProperty(Puck::ZERO, zeroed);
 }
 
 void SafetyModule::ignoreNextVelocityFault()
@@ -102,6 +149,14 @@ void SafetyModule::ignoreNextVelocityFault()
 
 void SafetyModule::setDefaultSafetyLimits()
 {
+	if (p->getVers() >= bus::CANopen::SB_CANOPEN_VERS) {
+		// On a CANopen board the limits are set by the operator or the
+		// application and are held in RAM; resetting them here would
+		// discard those values on every program start.
+		logMessage("SafetyModule::%s(): CANopen safety board - keeping its "
+				"current TL1/TL2/VL1/VL2 (no DEF).") % __func__;
+		return;
+	}
 	p->resetProperty(Puck::VL1);
 	p->resetProperty(Puck::VL2);
 	p->resetProperty(Puck::TL1);
@@ -110,13 +165,15 @@ void SafetyModule::setDefaultSafetyLimits()
 
 void SafetyModule::setTorqueLimit(double fault, double warning, int ipnm)
 {
-	assert(fault > 0.0);
-	if (warning < 0.0) {
-		warning = 0.9 * fault;
-	}
-
-	p->setProperty(Puck::TL2, (int)(fault*ipnm));
-	p->setProperty(Puck::TL1, (int)(warning*ipnm));
+	// Not implemented for CANopen: TL1/TL2 are in per-mille of each
+	// motor's rated torque, so a single Nm limit has no direct conversion
+	// (contract OPEN-2).  The board's own limits stay in effect.
+	(void)ipnm;
+	logMessage("SafetyModule::%s(): DISABLED pending the CANopen "
+			"torque-limit unit change (contract OPEN-2). "
+			"Requested fault=%.2f Nm, warning=%.2f Nm ignored; "
+			"the safety board's stored TL1/TL2 remain in effect.", true)
+			% __func__ % fault % warning;
 }
 
 void SafetyModule::setVelocityLimit(double fault, double warning)

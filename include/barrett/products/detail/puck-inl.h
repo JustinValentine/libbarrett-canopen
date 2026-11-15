@@ -34,6 +34,7 @@
 
 #include <barrett/os.h>
 #include <barrett/thread/abstract/mutex.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck_group.h>
 
 
@@ -86,12 +87,9 @@ int Puck::tryGetProperty(const bus::CommunicationsBus& bus, int id, int propId, 
 template<typename Parser>
 int Puck::getPropertyHelper(const bus::CommunicationsBus& bus, int id, int propId, typename Parser::result_type* result, bool blocking, bool realtime, double timeout_s)
 {
-	//boost::unique_lock<thread::Mutex> ul(bus.getMutex(), boost::defer_lock);
-	//if (realtime) {
-	//	ul.lock();
-	//}
-	BARRETT_SCOPED_LOCK(bus.getMutex());
+	BARRETT_SCOPED_LOCK(bus.getSdoMutex());
 
+	bus::CANopen::drainSdoReplies(bus, id);
 	int ret = sendGetPropertyRequest(bus, id, propId);
 	if (ret != 0) {
 		(logMessage("Puck::%s(): Failed to send request. "
@@ -108,37 +106,34 @@ int Puck::getPropertyHelper(const bus::CommunicationsBus& bus, int id, int propI
 
 inline void Puck::setProperty(const bus::CommunicationsBus& bus, int id, int propId, int value, bool blocking)
 {
-	static const size_t MSG_LEN = 6;
+	// An SDO download is always confirmed, so blocking has no effect.
+	(void)blocking;
 
-	unsigned char data[MSG_LEN];
-	data[0] = (propId & PROPERTY_MASK) | SET_MASK;
-	data[1] = 0;
-	data[2] = (value & 0x000000ff);
-	data[3] = (value & 0x0000ff00) >>  8;
-	data[4] = (value & 0x00ff0000) >> 16;
-	data[5] = (value & 0xff000000) >> 24;
-
-	int ret = bus.send(nodeId2BusId(id), data, MSG_LEN);
-	if (ret != 0) {
-		(logMessage("Puck::%s(): Failed to send SET message. "
-				"bus::CommunicationsBus::send() returned error %d.")
-				% __func__ % ret).raise<std::runtime_error>();
+	int index, sub, nbytes;
+	if (!propToOd(id, propId, &index, &sub, &nbytes)) {
+		(logMessage("Puck::%s(): Property %d has no CANopen object on node %d.")
+				% __func__ % propId % id).raise<std::runtime_error>();
 	}
-
-	if (blocking) {
-		// Make sure the command has completed so we don't overflow the Puck's receive buffer.
-		getProperty(bus, id, getPropertyId(STAT, PT_Unknown, 0));
-	}
+	bus::CANopen::sdoDownload(bus, id, index, sub, value, nbytes);
 }
 
 inline int Puck::sendGetPropertyRequest(const bus::CommunicationsBus& bus, int id, int propId)
 {
-	static const size_t MSG_LEN = 1;
+	// An SDO upload request; receiveGetPropertyReply() collects the response.
+	int index, sub, nbytes;
+	if (!propToOd(id, propId, &index, &sub, &nbytes)) {
+		(logMessage("Puck::%s(): Property %d has no CANopen object on node %d.")
+				% __func__ % propId % id).raise<std::runtime_error>();
+	}
 
-	unsigned char data[MSG_LEN];
-	data[0] = propId & PROPERTY_MASK;
+	unsigned char data[8];
+	data[0] = 0x40;  // upload initiate
+	data[1] = index & 0xFF;
+	data[2] = (index >> 8) & 0xFF;
+	data[3] = sub;
+	data[4] = data[5] = data[6] = data[7] = 0;
 
-	return bus.send(nodeId2BusId(id), data, MSG_LEN);
+	return bus.send(bus::CANopen::COB_SDO_RX_BASE + id, data, 8);
 }
 
 inline int Puck::receiveGetPropertyReply(const bus::CommunicationsBus& bus, int id, int propId, int* result, bool blocking, bool realtime)
@@ -174,7 +169,7 @@ inline int Puck::getPropertyId(enum Property prop, enum PuckType pt, int fwVers)
 
 inline int Puck::StandardParser::busId(int id, int propId)
 {
-	return Puck::encodeBusId(id, PuckGroup::FGRP_OTHER);
+	return bus::CANopen::COB_SDO_TX_BASE + id;
 }
 
 
