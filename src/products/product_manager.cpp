@@ -95,7 +95,7 @@ ProductManager::ProductManager(const char* configFile, bus::CommunicationsBus* _
 		free(cf1);
 		throw std::runtime_error("Out of memory.");
 	}
-	char* origWd = get_current_dir_name();
+	char* origWd = getcwd(NULL, 0);
 	if (origWd == NULL) {
 		free(cf1);
 		free(cf2);

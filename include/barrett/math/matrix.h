@@ -176,15 +176,15 @@ template<typename TraitsDerived> struct Traits<Eigen::MatrixBase<TraitsDerived> 
 
 
 	static const ConstantReturnType zero() {
-		return MatrixBaseType::Zero();
+		return MatrixBaseType::Constant(0.0);
 	}
 
 	static const ConstantReturnType zero(int r) {
-		return MatrixBaseType::Zero(r);
+		return MatrixBaseType::Constant(r, 0.0);
 	}
 
 	static const ConstantReturnType zero(int r, int c) {
-		return MatrixBaseType::Zero(r,c);
+		return MatrixBaseType::Constant(r, c, 0.0);
 	}
 
 	template<typename Derived>
