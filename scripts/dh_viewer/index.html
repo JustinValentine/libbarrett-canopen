@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAM8g · DH Explorer</title><style>/*__STYLE__*/</style></head>
+<body>
+<header><div class="brand"><span class="brand-mark">⌁</span><div><h1>DH Explorer <span id="profile-name">WAM8g</span></h1><p id="source-name"></p></div></div><div class="header-actions"><span class="offline"><i></i> Offline preview</span><button id="download">Download edited .conf</button></div></header>
+<div id="notice" role="status"></div>
+<div id="input-error" role="status" hidden>Enter a finite number to continue. Leaving an invalid field restores its last valid value.</div>
+<main>
+  <aside class="joints-panel panel">
+    <div class="section-head"><h2>Joint pose</h2><div class="segments" id="units"><button class="active" data-unit="deg">deg</button><button data-unit="rad">rad</button></div></div>
+    <p class="muted">Select a joint to inspect its rotation axis.</p>
+    <div class="pose-actions"><button id="zero">Zero pose</button><button id="home">Config home</button></div>
+    <div id="joints"></div>
+    <button id="sweep" class="wide">▶ Sweep selected joint</button>
+    <div class="note" id="passive-note"></div>
+    <details class="explanation"><summary>How to check the geometry</summary><ol><li>Set the joint angles to a known pose.</li><li>Select and sweep one joint. Compare its orange rotation axis with the physical joint.</li><li>Edit α, a and d to place the next frame correctly.</li><li>Check the wrist at several angles, then the tool origin and orientation.</li></ol><p>Links show the DH offsets, not the physical robot’s shape. A visual match alone does not calibrate the robot.</p></details>
+  </aside>
+  <section class="scene-panel">
+    <div class="scene-toolbar"><div class="segments" id="views"><button data-view="iso" class="active">3D</button><button data-view="front">Front · XZ</button><button data-view="side">Side · YZ</button><button data-view="top">Top · XY</button></div><button id="fit">Fit model</button></div>
+    <div id="viewport"><canvas id="scene" aria-label="Interactive robot DH model. Drag to orbit, scroll to zoom, shift-drag to pan."></canvas><div class="scene-caption"><span class="eyebrow">STANDARD DENAVIT–HARTENBERG</span><strong id="selection-caption"></strong><span id="selection-subtitle"></span></div><div class="legend"><span><i class="x"></i>X</span><span><i class="y"></i>Y</span><span><i class="z"></i>Z</span><span><i class="rotation"></i>Selected rotation axis</span></div><div class="scene-hint">Drag to orbit · Scroll to zoom · Shift-drag to pan</div></div>
+    <div class="scene-options"><label><input type="checkbox" id="all-frames">All frames</label><label><input type="checkbox" id="axes" checked>Joint axes</label><label><input type="checkbox" id="labels" checked>Labels</label><label><input type="checkbox" id="ghost">Original geometry</label><label>Frame size <input type="range" id="frame-size" min="20" max="200" value="85" aria-label="Frame axis length in millimeters"></label></div>
+    <div class="metrics"><div><span>TOOL X</span><strong id="tool-x"></strong></div><div><span>TOOL Y</span><strong id="tool-y"></strong></div><div><span>TOOL Z</span><strong id="tool-z"></strong></div><div><span>MODEL</span><strong id="model-state">Original</strong></div></div>
+  </section>
+  <aside class="dh-panel panel">
+    <div class="section-head"><h2>DH parameters</h2><button id="reset" class="text-button">Reset edits</button></div>
+    <p class="muted">Edit to preview. Lengths are shown in mm.</p>
+    <table class="dh-table"><thead><tr><th>Frame</th><th title="Twist about the new X axis, in multiples of pi">α / π</th><th title="Fixed rotation offset about the previous Z axis, in multiples of pi. Added to the joint angle.">theta_pi</th><th title="Offset along the new X axis, in millimeters">a · mm</th><th title="Offset along the previous Z axis, in millimeters">d · mm</th></tr></thead><tbody id="dh-rows"></tbody></table>
+    <div class="formula">Rz(θ) · Tz(d) · Tx(a) · Rx(α)</div><p class="muted convention">α = alpha_pi × π. Moving θ = joint angle + theta_pi × π. The tool rotation is theta_pi × π. Zero sliders retain all fixed offsets. Joint Jᵢ rotates about zᵢ₋₁. Exported lengths are in meters.</p>
+    <section class="inspector"><h3 id="inspector-title"></h3><div id="axis-values"></div><h4 id="matrix-title"></h4><div id="matrix" class="matrix"></div><p class="muted">Transform to world; translation in meters.</p></section>
+    <details><summary>Preview kinematics block</summary><textarea id="config-preview" readonly spellcheck="false" aria-label="Kinematics configuration preview"></textarea><button id="copy" class="wide">Copy kinematics block</button></details>
+    <p class="note" id="export-note"></p>
+  </aside>
+</main>
+<footer><span id="footer-source"></span><span>Re-run visualize_dh.py to load changes from disk.</span></footer>
+<script id="model-data" type="application/json">/*__MODEL__*/</script>
+<script>/*__MATH__*/</script><script>/*__APP__*/</script>
+</body></html>
