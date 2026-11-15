@@ -70,7 +70,7 @@ public:
 
 	void enumerate();
 	void cleanUpAfterEstop();
-	void wakeAllPucks() const { Puck::wake(getPucks()); }
+	void wakeAllPucks() const;
 
 	bool foundSafetyModule() const;
 	SafetyModule* getSafetyModule();
@@ -120,6 +120,9 @@ public:
 	static const int FORCE_TORQUE_SENSOR_ID = 8;
 
 protected:
+	int expectedPuckMask() const;
+	int presentPuckMask() const;
+	bool expectedPucksPresent() const;
 	void destroyEstopProducts();
 	bool verifyWamPucks(const size_t dof) const;
 

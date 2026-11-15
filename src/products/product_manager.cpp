@@ -36,6 +36,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 
 #include <string.h>
 #include <libgen.h>
@@ -46,6 +47,7 @@
 #include <barrett/detail/stl_utils.h>
 #include <barrett/bus/abstract/communications_bus.h>
 #include <barrett/bus/bus_manager.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/hand.h>
 #include <barrett/products/gimbals_hand_controller.h>
@@ -172,7 +174,6 @@ ProductManager::~ProductManager()
 void ProductManager::enumerate()
 {
 	int ret, result;
-	int propId = Puck::getPropertyId(Puck::STAT, Puck::PT_Unknown, 0);
 	Puck* p = NULL;
 	int lastId = -1;
 	int id;
@@ -181,14 +182,16 @@ void ProductManager::enumerate()
 
 	logMessage("ProductManager::%s()") % __func__;
 
-	// Clear out the socket
+	// Clear out the socket (stop on an error too: it may never clear)
 	do {
 		ret  = bus->receiveRaw(id, data, len, false);
-	}while(ret != 1);
+	} while (ret == 0);
 
 	logMessage("  Pucks:");
 	for (int id = Puck::MIN_ID; id <= Puck::MAX_ID; ++id) {
-		ret = Puck::tryGetProperty(*bus, id, propId, &result);
+		// Probe each node with an SDO read of its device type (0x1000)
+		ret = bus::CANopen::sdoUpload(*bus, id, bus::CANopen::OD_DEVICE_TYPE, 0,
+				&result, 0.02);
 		p = getPuck(id);
 
 		if (ret == 0) {
@@ -200,13 +203,14 @@ void ProductManager::enumerate()
 				// if the Puck already exists (from a previous enumeration), update it
 				p->updateRole();
 				p->updateStatus();
+				p->setAwake(false);  // it may have been restarted by an E-stop
 			}
 
 			if (lastId != id - 1  &&  lastId != -1) {
 				logMessage("    --");  // marker to indicate that the listed IDs are not contiguous
 			}
-			logMessage("    ID=%2d VERS=%3d ROLE=0x%04x TYPE=%s%s")
-					% p->getId() % p->getVers() % p->getRole()
+			logMessage("    ID=%2d VERS=%3d (identity rev %d) ROLE=0x%04x TYPE=%s%s")
+					% p->getId() % p->getVers() % p->getIdentityRevision() % p->getRole()
 					% Puck::getPuckTypeStr(p->getType())
 					% ((p->getEffectiveType() == Puck::PT_Monitor) ? " (Monitor)" : "");
 			lastId = id;
@@ -291,6 +295,92 @@ void ProductManager::destroyEstopProducts()
 	ghc = NULL;
 }
 
+int ProductManager::expectedPuckMask() const
+{
+	// Optional: the robot's physical puck set.  With it, a missing puck
+	// stops startup instead of changing which WAM is detected.
+	if (!config.exists("bus.expected_puck_mask")) {
+		return 0;
+	}
+	const int mask = config.lookup("bus.expected_puck_mask");
+	if (mask <= 0 || (mask & ~0x01FE) != 0) {
+		throw std::invalid_argument("bus.expected_puck_mask must contain only puck-node bits 1-8 and must not be empty.");
+	}
+	return mask;
+}
+
+int ProductManager::presentPuckMask() const
+{
+	int mask = 0;
+	for (int node = 1; node <= 8; ++node) {
+		Puck* puck = getPuck(node);
+		if (puck != NULL && puck->getType() == Puck::PT_Motor) {
+			mask |= 1 << node;
+		}
+	}
+	return mask;
+}
+
+bool ProductManager::expectedPucksPresent() const
+{
+	const int expected = expectedPuckMask();
+	return expected == 0 || expected == presentPuckMask();
+}
+
+void ProductManager::wakeAllPucks() const
+{
+	const int present = presentPuckMask();
+	const int expected = expectedPuckMask();
+	if (present == 0) {
+		(logMessage("ProductManager::%s(): no pucks found. Startup stopped.")
+				% __func__).raise<std::runtime_error>();
+	}
+	if (!expectedPucksPresent()) {
+		(logMessage("ProductManager::%s(): puck set mismatch: expected 0x%03x, found 0x%03x. Startup stopped.")
+				% __func__ % expected % present).raise<std::runtime_error>();
+	}
+	const int required = (expected != 0) ? expected : present;
+	if (!foundSafetyModule()) {
+		throw std::runtime_error("ProductManager::wakeAllPucks(): no safety board; startup stopped.");
+	}
+	// Tell the safety board which pucks to watch.  None is sensor-only.
+	const int mask = 0;
+	bus::CANopen::configureSafetyNodes(*bus, required, mask);
+	bus::CANopen::setSensorOnlyNodes(*bus, mask);
+	bus::CANopen::validateWamEncoders(*bus);
+
+	// Keep the previous run's zero if the safety board still holds it
+	// (r209+) and every puck has kept counting since.  The pucks are then
+	// not reset, which would restart their position counters.
+	bool keepZero = false;
+	if (getPuck(SAFETY_MODULE_ID)->getVers() >= bus::CANopen::SB_ZERO_RECORD_VERS
+			&& bus::CANopen::zeroRecordNodes(*bus) != 0) {
+		bus::CANopen::ZeroRecord record;
+		std::string why;
+		keepZero = bus::CANopen::readZeroRecord(*bus, required, &record, &why);
+		if (!keepZero) {
+			printf(">>> Not keeping the previous WAM zero: %s.\n", why.c_str());
+			bus::CANopen::clearZeroRecord(*bus);
+		}
+	}
+
+	try {
+		Puck::wake(getPucks(), !keepZero);
+	} catch (...) {
+		// A drive may be left enabled by an interrupted bring-up: E-stop.
+		try {
+			getPuck(SAFETY_MODULE_ID)->setProperty(Puck::MODE, SafetyModule::ESTOP, true);
+		} catch (...) {
+			logMessage("ProductManager::wakeAllPucks(): safety-board ESTOP request failed during startup cleanup.", true);
+		}
+		throw;
+	}
+
+	// The host keeps the WAM zero, so the board's ZERO flag stays 0, which
+	// keeps the board on its per-joint velocity limits.
+	getPuck(SAFETY_MODULE_ID)->setProperty(Puck::ZERO, 0, true);
+}
+
 
 bool ProductManager::foundSafetyModule() const
 {
@@ -353,7 +443,7 @@ void ProductManager::waitForWam(bool promptOnZeroing)
 	if ( !foundWam() ) {
 		enumerate();
 		if ( !foundWam() ) {
-			printf(">>> ERROR: No WAM was found.\n");
+			printf(">>> ERROR: No complete WAM was found (expected puck mask 0x%03x, found 0x%03x).\n", expectedPuckMask(), presentPuckMask());
 			exit(1);
 		}
 	}
@@ -362,6 +452,9 @@ void ProductManager::waitForWam(bool promptOnZeroing)
 		if ( !sm->wamIsZeroed() ) {
 			printf(">>> The WAM needs to be zeroed. Please move it to its home position, then press [Enter].");
 			detail::waitForEnter();
+		} else if (sm->hasZeroRecord()) {
+			printf(">>> Keeping the WAM zero from the previous run (no puck has been reset since).\n"
+					"    To zero it again at the home position: E-Stop, Shift-Idle, restart.\n");
 		}
 	}
 
@@ -534,6 +627,9 @@ systems::Wam<7>* ProductManager::getWam7(bool waitForShiftActivate, const char* 
 systems::RealTimeExecutionManager* ProductManager::getExecutionManager(double period_s, int rt_priority)
 {
 	if (rtem == NULL) {
+		if (!std::isfinite(period_s) || std::fabs(period_s - bus::CANopen::SYNC_PERIOD_US * 1e-6) > 1e-9) {
+			throw std::invalid_argument("The CANopen puck configuration requires a 2 ms (500 Hz) execution period.");
+		}
 		rtem = new systems::RealTimeExecutionManager(period_s, rt_priority);
 	}
 	return rtem;
@@ -548,7 +644,8 @@ void ProductManager::startExecutionManager() {
 
 bool ProductManager::foundForceTorqueSensor() const
 {
-	return getPuck(FORCE_TORQUE_SENSOR_ID) != NULL;
+	Puck* p = getPuck(FORCE_TORQUE_SENSOR_ID);
+	return p != NULL && p->getType() == Puck::PT_ForceTorque;
 }
 ForceTorqueSensor* ProductManager::getForceTorqueSensor()
 {
@@ -616,12 +713,13 @@ void ProductManager::deletePuck(Puck* p)
 
 bool ProductManager::verifyWamPucks(const size_t dof) const
 {
+	if (!expectedPucksPresent()) return false;
 	if (dof > MAX_WAM_DOF) {
 		return false;
 	}
 
 	for (size_t i = 0; i < MAX_WAM_DOF; ++i) {
-		if ( (i < dof)  ^  (wamPucks[i] != NULL) ) {
+		if ( (i < dof)  ^  (wamPucks[i] != NULL && wamPucks[i]->getType() == Puck::PT_Motor) ) {
 			return false;
 		}
 	}

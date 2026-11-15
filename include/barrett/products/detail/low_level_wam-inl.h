@@ -33,9 +33,12 @@
 
 
 #include <stdexcept>
+#include <string>
 #include <vector>
+#include <algorithm>
 #include <limits>
 #include <cmath>
+#include <cstdio>
 #include <cassert>
 
 #include <boost/static_assert.hpp>
@@ -45,6 +48,7 @@
 #include <barrett/os.h>
 #include <barrett/detail/stl_utils.h>
 #include <barrett/units.h>
+#include <barrett/bus/canopen.h>
 #include <barrett/products/puck.h>
 #include <barrett/products/motor_puck.h>
 #include <barrett/products/safety_module.h>
@@ -67,12 +71,14 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 	safetyModule(_safetyModule), torqueGroups(),
 	home(setting["home"]), j2mp(setting["j2mp"]),
 	noJointEncoders(true), positionSensor(PS_MOTOR_ENCODER),
-	lastUpdate(0.0), torquePropId(group.getPropertyId(Puck::T))
+	lastUpdate(0.0), torquePropId(group.getPropertyIdNoThrow(Puck::T)),
+	hbDivider(0)
 {
 	logMessage("  Config setting: %s => \"%s\"") % setting.getSourceFile() % setting.getPath();
 
 
-	group.setProperty(Puck::MODE, MotorPuck::MODE_IDLE);  // Make sure the Pucks are IDLE
+	// The pucks are already disabled here: Puck::wake() leaves them in
+	// Switch-on-disabled and only the safety board can enable them.
 
 
 	// Zero-compensation?
@@ -93,10 +99,10 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 
 
 	// Setup torque groups
-	// If no IDs are provided, use the defaults
+	// If no IDs are provided, use the defaults: the two torque-quad COB-IDs
 	if (torqueGroupIds.size() == 0) {
-		torqueGroupIds.push_back(PuckGroup::BGRP_LOWER_WAM);
-		torqueGroupIds.push_back(PuckGroup::BGRP_UPPER_WAM);
+		torqueGroupIds.push_back(bus::CANopen::COB_QUAD_A);
+		torqueGroupIds.push_back(bus::CANopen::COB_QUAD_B);
 	}
 	size_t numTorqueGroups = ceil(static_cast<double>(DOF)/MotorPuck::PUCKS_PER_TORQUE_GROUP);
 	if (numTorqueGroups > torqueGroupIds.size()) {
@@ -115,6 +121,11 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 		}
 		torqueGroups.push_back(new PuckGroup(torqueGroupIds[g], tgPucks));
 	}
+	// Frees the groups if the rest of the constructor throws.
+	struct TorqueGroupGuard {
+		std::vector<PuckGroup*>* groups;
+		~TorqueGroupGuard() { if (groups != NULL) detail::purge(*groups); }
+	} torqueGroupGuard = { &torqueGroups };
 
 
 	// Compute puck/joint transforms
@@ -131,62 +142,132 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 	}
 	p2jp = m2jp * rpc.asDiagonal();
 
-	v_type ipnm;
+	// Torque scale: per-mille of rated torque per Nm (contract section 5.2)
+	v_type ppnm;
 	for (size_t i = 0; i < DOF; ++i) {
-		ipnm[i] = motorPucks[i].getIpnm();
+		ppnm[i] = motorPucks[i].getPermillePerNm();
 	}
-	j2pt = ipnm.asDiagonal() * j2mt;
+	j2pt = ppnm.asDiagonal() * j2mt;
+	ppOffset.setConstant(0.0);
+
+	// Optional per-motor signs of the reported counts and of the commanded
+	// torque, relative to the convention j2mp encodes (+1 = as j2mp
+	// expects).  Opposite signs on one motor would make its joint loop
+	// positive feedback, so that is refused.
+	posSign.setConstant(1.0);
+	trqSign.setConstant(1.0);
+	if (setting.exists("canopen_position_sign")) {
+		posSign = v_type(setting["canopen_position_sign"]);
+	}
+	if (setting.exists("canopen_torque_sign")) {
+		trqSign = v_type(setting["canopen_torque_sign"]);
+	}
+	for (size_t i = 0; i < DOF; ++i) {
+		if (fabs(fabs(posSign[i]) - 1.0) > 1e-9 || fabs(fabs(trqSign[i]) - 1.0) > 1e-9) {
+			(logMessage("LowLevelWam::%s(): canopen_position_sign / canopen_torque_sign "
+					"entries must be +1 or -1.") % __func__).template raise<std::runtime_error>();
+		}
+		if (posSign[i] != trqSign[i]) {
+			(logMessage("LowLevelWam::%s(): motor %d has canopen_position_sign %+.0f but "
+					"canopen_torque_sign %+.0f. Opposite signs make its joint loop positive "
+					"feedback; that reading means the puck's commutation zero is wrong "
+					"(calibrate it, then re-measure), not that the signs differ.")
+					% __func__ % (int)(i + 1) % posSign[i] % trqSign[i]).template raise<std::runtime_error>();
+		}
+	}
 
 
 	// Zero the WAM?
 	if (safetyModule == NULL) {
 		logMessage("  No safetyModule: WAM might not be zeroed");
 	} else if (safetyModule->wamIsZeroed()) {
-		logMessage("  WAM was already zeroed");
+		if (safetyModule->hasZeroRecord()) {
+			restoreZero();
+		} else {
+			logMessage("  WAM was already zeroed");
+		}
+	} else if (safetyModule->zeroWasKept()) {
+		// The operator was told the zero would be kept, so the WAM is not
+		// necessarily at home.
+		(logMessage("LowLevelWam::%s(): the WAM zero kept from the previous "
+				"run was lost during startup (a puck was reset?). Restart "
+				"the program to zero the WAM at its home position.")
+				% __func__).template raise<std::runtime_error>();
 	} else if (zeroCompensation) {
+		// Zero compensation: a P4's single-turn encoder (0x3012:01) is
+		// absolute within one motor turn, so the WAM only has to be within
+		// half a motor turn of home.  zeroangle is each motor's encoder
+		// angle with its joints at zero; zeroangle_dir is how that encoder
+		// counts relative to the position counter (measured by
+		// bt-wam-zerocal).  A motor without a direction is zeroed at home.
 		v_type zeroAngle(setting["zeroangle"]);
-
-		v_type currentAngle;
-		for (size_t i = 0; i < DOF; ++i) {
-			currentAngle[i] = motorPucks[i].counts2rad(pucks[i]->getProperty(Puck::MECH));
+		v_type zeroAngleDir(0.0);
+		if (setting.exists("zeroangle_dir")) {
+			zeroAngleDir = v_type(setting["zeroangle_dir"]);
 		}
-
-		v_type errorAngle = (j2mp*home + zeroAngle) - currentAngle;
+		const v_type homeMotor = j2mp * home;
+		v_type errorAngle(0.0);  // per motor: reading expected at home minus actual
+		std::vector<bool> snapped(DOF, false);
+		std::vector<int> marginal;
 		for (size_t i = 0; i < DOF; ++i) {
-			while (errorAngle[i] > M_PI) {
-				errorAngle[i] -= 2*M_PI;
-			}
-			while (errorAngle[i] < -M_PI) {
-				errorAngle[i] += 2*M_PI;
-			}
-		}
-
-		// Check for exclusions
-		for (size_t i = 0; i < DOF; ++i) {
-			// If VERS < 118, then nothing useful is exposed on MECH; don't compensate
-			if (pucks[i]->getVers() < 118) {
-				logMessage("  No zero-compensation for Puck %d: old firmware") % pucks[i]->getId();
-				errorAngle[i] = 0;
+			const int id = pucks[i]->getId();
+			if (zeroAngleDir[i] != 1.0  &&  zeroAngleDir[i] != -1.0) {
+				logMessage("  No zero-compensation for Puck %d: encoder direction not measured") % id;
 				continue;
 			}
-
-			// If not ROLE & 256, then it's not an absolute encoder; don't compensate
-			if ( !(pucks[i]->hasOption(Puck::RO_MagEncOnSerial)) ) {
-				logMessage("  No zero-compensation for Puck %d: no absolute encoder") % pucks[i]->getId();
-				errorAngle[i] = 0;
+			if (zeroAngle[i] >= 2*M_PI  ||  zeroAngle[i] < 0) {
+				logMessage("  No zero-compensation for Puck %d: bad calibration data") % id;
 				continue;
 			}
-
-			// If the calibration data is out of range, don't compensate
-			if (zeroAngle[i] > 2*M_PI  ||  zeroAngle[i] < 0) {
-				logMessage("  No zero-compensation for Puck %d: bad calibration data") % pucks[i]->getId();
-				errorAngle[i] = 0;
-				continue;
+			int mech = 0;
+			if (bus::CANopen::sdoUpload(bus, id, bus::CANopen::OD_RAW_POSITION, 1, &mech) != 0) {
+				(logMessage("LowLevelWam::%s(): no reply reading the single-turn "
+						"encoder of Puck %d; cannot zero.") % __func__ % id)
+						.template raise<std::runtime_error>();
+			}
+			// dir: that encoder's direction relative to this library's motor angles
+			const double dir = zeroAngleDir[i] * posSign[i];
+			double error = zeroAngle[i] + dir*homeMotor[i] - motorPucks[i].counts2rad(mech);
+			error -= 2*M_PI * std::floor((error + M_PI) / (2*M_PI));  // [-pi, pi)
+			errorAngle[i] = dir * error;
+			snapped[i] = true;
+			if (std::fabs(error) > 0.6*M_PI) {
+				marginal.push_back(id);
 			}
 		}
 
-		definePosition(home - m2jp*errorAngle);
-		logMessage("  WAM zeroed with zero-compensation");
+		const jp_type zeroed(home - m2jp*errorAngle);
+		definePosition(zeroed);
+		if (std::find(snapped.begin(), snapped.end(), true) == snapped.end()) {
+			logMessage("  WAM zeroed without zero-compensation");
+		} else {
+			// Per joint: how far from home the WAM was ("--": none of the
+			// joint's motors has encoder data, so it was taken to be at home).
+			const double tolerance = m2jp.cwiseAbs().maxCoeff() * 1e-5;
+			std::string offsets;
+			char text[32];
+			for (size_t j = 0; j < DOF; ++j) {
+				bool known = false;
+				for (size_t i = 0; i < DOF; ++i) {
+					known = known || (snapped[i]  &&  std::fabs(m2jp(j,i)) > tolerance);
+				}
+				if (known) {
+					snprintf(text, sizeof(text), "%sJ%d %+.2f", j ? ", " : "", (int)j + 1,
+							(zeroed[j] - home[j]) * 180.0/M_PI);
+				} else {
+					snprintf(text, sizeof(text), "%sJ%d --", j ? ", " : "", (int)j + 1);
+				}
+				offsets += text;
+			}
+			logMessage("  WAM zeroed from the single-turn encoders; it sat this far "
+					"from home (deg): %s", true) % offsets;
+		}
+		for (size_t k = 0; k < marginal.size(); ++k) {
+			logMessage("  WARNING: Puck %d read more than 60%% of half a motor turn "
+					"from home. If the WAM was that far off, its zero may be a whole "
+					"motor turn wrong: check the joint angles, or E-Stop, Shift-Idle "
+					"and restart with the WAM closer to home.", true) % marginal[k];
+		}
 	} else {
 		definePosition(home);
 		logMessage("  WAM zeroed without zero-compensation");
@@ -232,6 +313,7 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 	// Get good initial values for jp_1 and lastUpdate
 	update();
 	jv_best.setZero();
+	torqueGroupGuard.groups = NULL;  // constructed: the destructor owns them now
 }
 
 template<size_t DOF>
@@ -290,38 +372,55 @@ void LowLevelWam<DOF>::update()
 {
 	double now = highResolutionSystemTime();
 
-	if (noJointEncoders) {
-		// Changing realtime to false. If this thread never yields, there is a chance the CAN request will never go out.
-		//group.getProperty<MotorPuck::MotorPositionParser<double> >(Puck::P, pp.data(), true);
-		group.getProperty<MotorPuck::MotorPositionParser<double> >(Puck::P, pp.data(), false);
-		jp_motorEncoder = p2jp * pp;  // Convert from Puck positions to joint positions
-		jp_best = jp_motorEncoder;
-	} else {
-		// Make sure the reinterpret_cast below makes sense.
-		BOOST_STATIC_ASSERT(sizeof(MotorPuck::CombinedPositionParser<double>::result_type) == 2*sizeof(double));
+	// One SYNC per cycle: the pucks apply the torques they last received
+	// and send their positions, which are collected below.  The host
+	// heartbeat goes out on the same cycle every 250 ms.  Joint encoders
+	// are not supported over CANopen.
+	{
+		BARRETT_SCOPED_LOCK(bus.getMutex());
 
-		// PuckGroup::getProperty() will fill pp_jep.data() with 2*DOF doubles:
-		// Primary Encoder 1, Secondary Encoder 1, Primary Encoder 2, Secondary Encoder 2, ...
-		group.getProperty<MotorPuck::CombinedPositionParser<double> >(
-				Puck::P,
-				reinterpret_cast<MotorPuck::CombinedPositionParser<double>::result_type*>(pp_jep.data()),
-				false);
-		jp_motorEncoder = p2jp * pp_jep.col(0);
-
+		// Discard positions left over from an earlier SYNC; read one per
+		// cycle, they would keep that puck a cycle behind for good.
+		unsigned char data[bus::CommunicationsBus::MAX_MESSAGE_LEN];
+		size_t len;
 		for (size_t i = 0; i < DOF; ++i) {
-			if (pp_jep(i,1) == std::numeric_limits<double>::max()) {
-				jp_jointEncoder[i] = 0.0;
-				jp_best[i] = jp_motorEncoder[i];
-			} else {
-				jp_jointEncoder[i] = jointEncoder2jp[i] * pp_jep(i,1);
-				if (useJointEncoder[i]) {
-					jp_best[i] = jp_jointEncoder[i];
-				} else {
-					jp_best[i] = jp_motorEncoder[i];
-				}
+			const int busId = bus::CANopen::COB_TPDO1_BASE + pucks[i]->getId();
+			for (int n = 0; n < 16  &&  bus.receive(busId, data, len, false) == 0; ++n) {
 			}
 		}
+
+		if (bus::CANopen::sync(bus) != 0) {
+			(logMessage("LowLevelWam::%s(): could not send SYNC.") % __func__)
+					.template raise<std::runtime_error>();
+		}
+		if (++hbDivider >= 125) {  // 250 ms at the 500 Hz cycle rate
+			hbDivider = 0;
+			bus::CANopen::hostHeartbeat(bus);
+		}
+
+		for (size_t i = 0; i < DOF; ++i) {
+			int busId = bus::CANopen::COB_TPDO1_BASE + pucks[i]->getId();
+			int ret = bus.receive(busId, data, len, true, true);
+			if (ret != 0) {
+				(logMessage("LowLevelWam::%s(): Failed to receive position "
+						"TPDO for Puck %d: receive() returned %d.")
+						% __func__ % pucks[i]->getId() % ret)
+						.template raise<std::runtime_error>();
+			}
+			double counts;
+			if (MotorPuck::MotorPositionParser<double>::parse(
+					pucks[i]->getId(), 0, &counts, data, len) != 0) {
+				(logMessage("LowLevelWam::%s(): Malformed position TPDO "
+						"from Puck %d.") % __func__ % pucks[i]->getId())
+						.template raise<std::runtime_error>();
+			}
+			pp[i] = posSign[i] * counts + ppOffset[i];
+		}
+		// Under the lock: definePosition() rewrites pp from another thread.
+		jp_motorEncoder = p2jp * pp;  // Convert from Puck positions to joint positions
 	}
+
+	jp_best = jp_motorEncoder;
 
 	jv_best = (jp_best - jp_best_1) / (now - lastUpdate);
 	// TODO(dc): Detect unreasonably large velocities
@@ -336,7 +435,17 @@ void LowLevelWam<DOF>::setTorques(const jt_type& jt)
 	// Get around C++ address-of-static-member weirdness...
 	static const size_t PUCKS_PER_TORQUE_GROUP = MotorPuck::PUCKS_PER_TORQUE_GROUP;
 
-	pt = j2pt * jt;  // Convert from joint torques to Puck torques
+	// Drop the torque of sensor-only joints before the transmission, so it
+	// cannot reach coupled motors, and zero their motor slots after it.
+	jt_type activeTorques(jt);
+	for (size_t j = 0; j < DOF; ++j) {
+		if (bus::CANopen::isSensorOnly(bus, pucks[j]->getId())) activeTorques[j] = 0.0;
+	}
+	pt = j2pt * activeTorques;
+	pt = trqSign.asDiagonal() * pt;
+	for (size_t j = 0; j < DOF; ++j) {
+		if (bus::CANopen::isSensorOnly(bus, pucks[j]->getId())) pt[j] = 0.0;
+	}
 
 	size_t i = 0;
 	BARRETT_SCOPED_LOCK(bus.getMutex());
@@ -355,20 +464,107 @@ void LowLevelWam<DOF>::definePosition(const jp_type& jp)
 		safetyModule->ignoreNextVelocityFault();
 	}
 
-	pp = j2pp * jp;  // Convert from joint positions to Puck positions
-
-	{
-		// Synchronize with execution-cycle
-		BARRETT_SCOPED_LOCK(bus.getMutex());
-		for (size_t i = 0; i < DOF; ++i) {
-			pucks[i]->setProperty(Puck::P, floor(pp[i]));
+	// Read all counters first: a failed read leaves the existing zero intact.
+	v_type rawPosition;
+	for (size_t i = 0; i < DOF; ++i) {
+		int raw = 0;
+		if (bus::CANopen::sdoUpload(bus, pucks[i]->getId(),
+				bus::CANopen::OD_POSITION, 0, &raw) != 0) {
+			(logMessage("LowLevelWam::%s(): no position reply from "
+					"Puck %d; cannot zero.") % __func__ % pucks[i]->getId())
+					.template raise<std::runtime_error>();
 		}
+		rawPosition[i] = raw;
 	}
+	applyZero(jp, rawPosition);
 
-	// Record the fact that the WAM has been zeroed
-	if (safetyModule != NULL) {
-		safetyModule->setWamZeroed();
+	// The safety board's ZERO flag is left at 0: the board sees the pucks'
+	// raw counts, so it must keep using its per-joint velocity limits
+	// rather than its Cartesian model.  The zero itself is stored on the
+	// board for the next run.
+	if (safetyModule != NULL  &&  safetyModule->hasZeroRecord()) {
+		recordZero(jp, rawPosition);
 	}
+}
+
+template<size_t DOF>
+double LowLevelWam<DOF>::singleTurnAtZero(size_t motor, double reading, const jp_type& jp, int direction) const
+{
+	const v_type motorAngle = j2mp * jp;
+	double angle = reading - direction * posSign[motor] * motorAngle[motor];
+	angle -= 2*M_PI * std::floor(angle / (2*M_PI));
+	return (angle < 2*M_PI) ? angle : 0.0;  // rounding can land on 2pi itself
+}
+
+template<size_t DOF>
+int LowLevelWam<DOF>::nodeMask() const
+{
+	int mask = 0;
+	for (size_t i = 0; i < DOF; ++i) {
+		mask |= 1 << pucks[i]->getId();
+	}
+	return mask;
+}
+
+// A P4's position counter (0x6064) restarts at 0 on every reset and cannot be
+// set, so the zero is a software offset per puck: raw counts rawPosition
+// correspond to jp.
+template<size_t DOF>
+void LowLevelWam<DOF>::applyZero(const jp_type& jp, const v_type& rawPosition)
+{
+	v_type target = j2pp * jp;  // Convert from joint positions to Puck positions
+
+	BARRETT_SCOPED_LOCK(bus.getMutex());  // synchronize with the execution cycle
+	for (size_t i = 0; i < DOF; ++i) {
+		ppOffset[i] = floor(target[i]) - posSign[i] * rawPosition[i];
+		pp[i] = posSign[i] * rawPosition[i] + ppOffset[i];
+	}
+}
+
+// Store the zero on the safety board for the next program run
+// (bus::CANopen::ZeroRecord).  Best effort: without it the next run asks for
+// the home position again.
+template<size_t DOF>
+void LowLevelWam<DOF>::recordZero(const jp_type& jp, const v_type& rawPosition)
+{
+	try {
+		bus::CANopen::ZeroRecord record = {};
+		record.nodeMask = nodeMask();
+		for (size_t i = 0; i < DOF; ++i) {
+			const int node = pucks[i]->getId();
+			int mech = 0;
+			if (bus::CANopen::sdoUpload(bus, node, bus::CANopen::OD_RAW_POSITION, 1, &mech) != 0) {
+				throw std::runtime_error("no reply reading the single-turn encoder");
+			}
+			record.jp[node - 1] = jp[i];
+			record.raw[node - 1] = (int)rawPosition[i];
+			record.mech[node - 1] = mech;
+		}
+		bus::CANopen::writeZeroRecord(bus, record);
+	} catch (const std::exception& e) {
+		logMessage("LowLevelWam::%s(): the WAM zero cannot be kept for the "
+				"next run: %s", true) % __func__ % e.what();
+	}
+}
+
+template<size_t DOF>
+void LowLevelWam<DOF>::restoreZero()
+{
+	bus::CANopen::ZeroRecord record;
+	std::string why;
+	if ( !bus::CANopen::readZeroRecord(bus, nodeMask(), &record, &why) ) {
+		(logMessage("LowLevelWam::%s(): cannot use the WAM zero kept from the "
+				"previous run (%s). Restart the program to zero the WAM at its "
+				"home position.") % __func__ % why).template raise<std::runtime_error>();
+	}
+	jp_type jp;
+	v_type rawPosition;
+	for (size_t i = 0; i < DOF; ++i) {
+		jp[i] = record.jp[pucks[i]->getId() - 1];
+		rawPosition[i] = record.raw[pucks[i]->getId() - 1];
+	}
+	applyZero(jp, rawPosition);
+	logMessage("  WAM zero kept from the previous run");
 }
 
 

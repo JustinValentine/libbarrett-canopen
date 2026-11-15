@@ -51,10 +51,11 @@ LowLevelWamWrapper<DOF>::LowLevelWamWrapper(
 		const libconfig::Setting& setting,
 		std::vector<int> torqueGroupIds,
 		const std::string& sysName) :
-	input(sink.input),
-	jpOutput(source.jpOutput), jvOutput(source.jvOutput),
 	llw(genericPucks, safetyModule, setting, torqueGroupIds),
-	sink(this, em, sysName + "::Sink"), source(this, em, sysName + "::Source")
+	// The source is constructed (and so executed) before the sink: each
+	// cycle must SYNC and read the positions before it sends torques.
+	source(this, em, sysName + "::Source"), sink(this, em, sysName + "::Sink"),
+	input(sink.input), jpOutput(source.jpOutput), jvOutput(source.jvOutput)
 {
 }
 

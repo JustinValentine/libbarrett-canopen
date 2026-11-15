@@ -102,8 +102,11 @@ int main(int argc, char** argv) {
 	}
 #endif
 
-	pm.waitForWam(BARRETT_SMF_PROMPT_ON_ZEROING);
+	pm.waitForWam(false);
 	pm.wakeAllPucks();
+	// Waking the pucks may reset their position counters, so ask for the
+	// home position only afterwards.
+	pm.waitForWam(BARRETT_SMF_PROMPT_ON_ZEROING);
 	// TODO(JH): Rehab Update implement and test
 	if (pm.foundWam3()) {
 		return wam_main(argc, argv, pm, *pm.getWam3(BARRETT_SMF_WAIT_FOR_SHIFT_ACTIVATE, BARRETT_SMF_WAM_CONFIG_PATH));
