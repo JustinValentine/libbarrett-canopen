@@ -72,7 +72,8 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 	home(setting["home"]), j2mp(setting["j2mp"]),
 	noJointEncoders(true), positionSensor(PS_MOTOR_ENCODER),
 	lastUpdate(0.0), torquePropId(group.getPropertyIdNoThrow(Puck::T)),
-	hbDivider(0)
+	hbDivider(0),
+	syncTime(0.0), syncToTorqueSum(0.0), syncToTorqueMax(0.0), syncToTorqueCount(0)
 {
 	logMessage("  Config setting: %s => \"%s\"") % setting.getSourceFile() % setting.getPath();
 
@@ -319,7 +320,28 @@ LowLevelWam<DOF>::LowLevelWam(const std::vector<Puck*>& _pucks, SafetyModule* _s
 template<size_t DOF>
 LowLevelWam<DOF>::~LowLevelWam()
 {
+	double mean = 0.0, max = 0.0;
+	const long cycles = getSyncToTorqueTime(&mean, &max);
+	if (cycles > 0) {
+		try {
+			logMessage("LowLevelWam: SYNC to torque frame sent: mean %.3f ms, longest %.3f ms, %d cycles.", true)
+					% (mean * 1e3) % (max * 1e3) % cycles;
+		} catch (...) {
+		}
+	}
 	detail::purge(torqueGroups);
+}
+
+template<size_t DOF>
+long LowLevelWam<DOF>::getSyncToTorqueTime(double* mean, double* max) const
+{
+	if (mean != NULL) {
+		*mean = (syncToTorqueCount > 0) ? syncToTorqueSum / syncToTorqueCount : 0.0;
+	}
+	if (max != NULL) {
+		*max = syncToTorqueMax;
+	}
+	return syncToTorqueCount;
 }
 
 
@@ -393,6 +415,7 @@ void LowLevelWam<DOF>::update()
 			(logMessage("LowLevelWam::%s(): could not send SYNC.") % __func__)
 					.template raise<std::runtime_error>();
 		}
+		syncTime = highResolutionSystemTime();
 		if (++hbDivider >= 125) {  // 250 ms at the 500 Hz cycle rate
 			hbDivider = 0;
 			bus::CANopen::hostHeartbeat(bus);
@@ -452,6 +475,14 @@ void LowLevelWam<DOF>::setTorques(const jt_type& jt)
 	for (size_t g = 0; g < torqueGroups.size(); ++g) {
 		MotorPuck::sendPackedTorques(bus, torqueGroups[g]->getId(), torquePropId, pt.data()+i, std::min(PUCKS_PER_TORQUE_GROUP, DOF-i));
 		i += PUCKS_PER_TORQUE_GROUP;
+		if (g == 0  &&  syncTime > 0.0) {
+			// The first group is the arm's quad: SYNC to its torque frame.
+			const double elapsed = highResolutionSystemTime() - syncTime;
+			syncTime = 0.0;  // one measurement per SYNC
+			syncToTorqueSum += elapsed;
+			if (elapsed > syncToTorqueMax) syncToTorqueMax = elapsed;
+			++syncToTorqueCount;
+		}
 	}
 }
 

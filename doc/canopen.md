@@ -97,6 +97,11 @@ P4 keeps its saved transmission types through the first setup while its
 objects read as written (the library writes the setup twice for that
 reason). Check the torque delay on the robot after changing them.
 
+When a WAM is destroyed the library prints the time from the arm's SYNC to
+its torque frame being sent (mean and longest);
+`LowLevelWam::getSyncToTorqueTime()` returns it. It is the bus and host
+share of the delay from position sample to torque.
+
 The safety board's velocity and torque limits (`VL1`, `VL2`, `TL1`, `TL2`)
 are held in its RAM and return to their defaults when the board powers up.
 `SafetyModule::setDefaultSafetyLimits()` does not change them on a CANopen

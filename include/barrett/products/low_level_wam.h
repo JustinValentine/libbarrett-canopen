@@ -90,6 +90,13 @@ public:
 	void setTorques(const jt_type& jt);
 	void definePosition(const jp_type& jp);
 
+	/** Time from the SYNC that samples the arm (nodes 1-4) to its torque
+	    frame being handed to the bus, in seconds, over the cycles so far:
+	    the bus and host share of the delay from sample to torque.  The
+	    frame is complete on the wire about 0.12 ms later.  Returns the
+	    number of cycles measured; also logged when the WAM is destroyed. */
+	long getSyncToTorqueTime(double* mean, double* max) const;
+
 	/** For bt-wam-zerocal: a motor's single-turn encoder angle (rad, 0-2pi)
 	    with its joints at zero, from a reading taken with the joints at jp.
 	    direction is how that encoder counts relative to the puck's position
@@ -124,6 +131,10 @@ protected:
 	v_type pt;
 	int torquePropId;
 	int hbDivider;  // counts cycles between host heartbeats
+
+	double syncTime;  // when update() last sent the arm's SYNC; 0: none since the last torque frame
+	double syncToTorqueSum, syncToTorqueMax;
+	long syncToTorqueCount;
 
 private:
 	int nodeMask() const;
