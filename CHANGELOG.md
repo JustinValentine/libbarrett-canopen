@@ -9,7 +9,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 - wam8g: a 4-DOF WAM with a passive joint and a three-motor wrist (see doc/wam8g.md)
 - Optional fixed theta offsets in DH kinematics
 - Linux: SCHED_FIFO control thread, priority-inheritance mutexes and a monotonic clock
-- Optional torque timing for P4 pucks: `bus.torque_on_arrival`, `bus.torque_interpolation_ms` (see doc/canopen.md)
+- Optional torque timing for P4 pucks: `bus.torque_on_arrival`, `bus.torque_interpolation_ms`, `bus.wrist_sync_first` (see doc/canopen.md)
 - `LowLevelWam::getSyncToTorqueTime()`: the time from SYNC to the arm's torque frame, also logged at exit
 - Builds against stock libconfig
 - Added a DH viewer (scripts/visualize_dh.py)

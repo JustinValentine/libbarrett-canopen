@@ -48,6 +48,8 @@ struct FakeBus : bus::CommunicationsBus {
 	int32_t counts[8] = {};
 	mutable double nextHeartbeat[8] = {};
 	int missingPosition = 0;
+	double positionFrameTime = 0.0;  // the clock moves by this for every position frame the host reads
+	mutable bool wristUnreadAtArmSync = false;  // a wrist position was still unread when the arm's SYNC went out
 	mutable int dropBootUpOnce = 0;  // node whose first boot-up frame is lost on the way to the host
 	int neverBootsUp = 0;      // node that never sends a boot-up
 	FakeBus() {
@@ -57,6 +59,7 @@ struct FakeBus : bus::CommunicationsBus {
 			objects[Key(n,0x6076,0)] = 1000; // one Nm rated
 			objects[Key(n,0x6041,0)] = 0x40;
 			objects[Key(n,0x1017,0)] = 250;  // heartbeat left on by a previous run
+			objects[Key(n,0x1005,0)] = 0x80;
 		}
 	}
 	thread::Mutex& getMutex() const override { return mutex; }
@@ -80,12 +83,17 @@ struct FakeBus : bus::CommunicationsBus {
 				replies.push_back(Frame{0x700+node,1,{0}});
 			}
 			objects[Key(node,0x1017,0)]=0;
+			objects[Key(node,0x1005,0)]=0x80;  // and the SYNC it answers is the saved one again
 			objects[Key(node,0x6060,0)]=0;     // a reset clears the mode setting
 			objects[Key(node,0x6041,0)]=0x40;  // and disables the drive
 			nextHeartbeat[node-1]=std::numeric_limits<double>::infinity();
-		} else if(id==CANopen::COB_SYNC) {
-			testTime += 0.002;
-			for(int n=1;n<=8;++n) if(n!=missingPosition) {
+		} else if(id==CANopen::COB_SYNC || id==CANopen::COB_SYNC_WRIST) {
+			// Each puck answers the SYNC its 0x1005 names.
+			if(id==CANopen::COB_SYNC) {
+				testTime += 0.002;
+				for(const auto& r:replies) if(r.id>=0x185 && r.id<=0x188) wristUnreadAtArmSync=true;
+			}
+			for(int n=1;n<=8;++n) if(n!=missingPosition && int(objects[Key(n,0x1005,0)])==id) {
 				Frame p={0x180+n,4,{}};
 				for(int b=0;b<4;++b) p.data[b]=(uint32_t(counts[n-1])>>(8*b))&255;
 				replies.push_back(p);
@@ -112,7 +120,9 @@ struct FakeBus : bus::CommunicationsBus {
 	}
 	int receive(int id, unsigned char* data, size_t& len, bool=false, bool=false) const override {
 		for(auto i=replies.begin();i!=replies.end();++i) if(i->id==id) {
-			len=i->len; std::memcpy(data,i->data,len); replies.erase(i); return 0;
+			len=i->len; std::memcpy(data,i->data,len); replies.erase(i);
+			if(id>=0x181 && id<=0x188) testTime += positionFrameTime;
+			return 0;
 		}
 		if(id>=0x701 && id<=0x708 && testTime>=nextHeartbeat[id-0x701]) {
 			nextHeartbeat[id-0x701]=testTime+objects[Key(id-0x700,0x1017,0)]/1000.0;
@@ -457,6 +467,99 @@ int main(int argc, char** argv)
 		bus.missingPosition=0; bus.replies.clear();
 	}
 
+	{
+		// bus.wrist_sync_first: pucks 5-8 answer a SYNC of their own, which
+		// every cycle sends first; the arm is sampled when they are in.
+		FakeBus splitBus;
+		CANopen::setSensorOnlyNodes(splitBus,0x20);
+		CANopen::setTorqueOnArrival(splitBus,true);
+		CANopen::setWristSyncFirst(splitBus,true);
+		std::vector<std::unique_ptr<Puck> > splitOwned;
+		std::vector<Puck*> splitPucks;
+		for(int n=1;n<=8;++n) { splitOwned.emplace_back(new Puck(splitBus,n)); splitPucks.push_back(splitOwned.back().get()); }
+		Puck::wake(splitPucks);
+		for(int n=1;n<=8;++n) {
+			// setups: how often the wake configured this puck (its heartbeat period is written once each time)
+			size_t written=0, setups=0;
+			for(const auto& f:splitBus.sent) {
+				if(f.id!=0x600+n || f.len!=8 || f.data[0]==0x40) continue;
+				if(f.data[1]==0x17 && f.data[2]==0x10) ++setups;
+				if(f.data[1]==0x05 && f.data[2]==0x10) { ++written; assert(f.data[4]==0x90); }
+			}
+			assert(splitBus.objects[FakeBus::Key(n,0x1005,0)]==(n>=5 ? 0x90u : 0x80u));
+			assert(setups>=1 && written==(n>=5 ? setups : 0u));  // in every setup; the arm's pucks are not written
+		}
+		typedef std::vector<int> Ids;
+		const auto cyclic=[](const FakeBus& b) {
+			Ids ids;
+			for(const auto& f:b.sent) if(f.id==0x80 || f.id==0x90 || f.id==0x201 || f.id==0x205) ids.push_back(f.id);
+			return ids;
+		};
+		{
+			systems::ManualExecutionManager em(0.002);
+			Wam8g wam(&em,splitPucks,NULL,profile);
+			splitBus.positionFrameTime=0.0001;
+			splitBus.counts[1]=2048; splitBus.counts[4]=1024; splitBus.counts[5]=128; splitBus.counts[6]=256; splitBus.counts[7]=512;
+			double mean=0, longest=0;
+			const long before=wam.getLowLevelWam().getSyncToTorqueTime(&mean,&longest);
+			const double sumBefore=mean*before;
+			splitBus.sent.clear(); splitBus.wristUnreadAtArmSync=false;
+			em.runExecutionCycle();
+			assert(cyclic(splitBus)==Ids({0x90,0x80,0x201,0x205}));
+			assert(splitBus.replies.empty() && !splitBus.wristUnreadAtArmSync);
+			const auto q=wam.getJointPositions();
+			near(q[4],M_PI/2); near(q[5],-128*2*M_PI/4096/8.7456);
+			near(q[6],(256-512)*2*M_PI/4096/(2*7.5077)); near(q[7],(256+512)*2*M_PI/4096/(2*7.5077));
+			assert(std::fabs(q[1])>1e-3 || std::fabs(q[2])>1e-3);  // the arm's sample of this cycle too
+			// From the arm's SYNC to its torque frame the host reads four
+			// position frames, not eight.
+			assert(wam.getLowLevelWam().getSyncToTorqueTime(&mean,&longest)==before+1);
+			near(mean*(before+1)-sumBefore,4*0.0001,1e-9); near(longest,4*0.0001,1e-9);
+			for(int i=0;i<3;++i) em.runExecutionCycle();
+			assert(splitBus.number(0x90)==4 && splitBus.number(0x80)==4 && splitBus.replies.empty());
+			// A wrist puck that does not answer stops the cycle before the
+			// arm is sampled and before any torque is sent.
+			splitBus.missingPosition=6; splitBus.sent.clear();
+			throws([&]{em.runExecutionCycle();});
+			assert(cyclic(splitBus)==Ids({0x90}));
+			splitBus.missingPosition=0; splitBus.replies.clear();
+			// So does an arm puck, with the wrist already read.
+			splitBus.missingPosition=3; splitBus.sent.clear();
+			throws([&]{em.runExecutionCycle();});
+			assert(cyclic(splitBus)==Ids({0x90,0x80}));
+			splitBus.missingPosition=0; splitBus.replies.clear();
+		}
+		// The setting off again and the pucks not reset (a start that keeps
+		// the zero): pucks 5-8 are put back on 0x80, and there is one SYNC.
+		CANopen::setWristSyncFirst(splitBus,false);
+		std::vector<std::unique_ptr<Puck> > backOwned;
+		std::vector<Puck*> backPucks;
+		for(int n=1;n<=8;++n) { backOwned.emplace_back(new Puck(splitBus,n)); backPucks.push_back(backOwned.back().get()); }
+		splitBus.sent.clear();
+		Puck::wake(backPucks,false);
+		for(int n=1;n<=8;++n) {
+			size_t written=0;
+			for(const auto& f:splitBus.sent) {
+				assert(!(f.id==0 && f.data[0]==CANopen::NMT_RESET_NODE));
+				if(f.id==0x600+n && f.len==8 && f.data[0]!=0x40 && f.data[1]==0x05 && f.data[2]==0x10) { ++written; assert(f.data[4]==0x80); }
+			}
+			assert(splitBus.objects[FakeBus::Key(n,0x1005,0)]==0x80u && written==(n>=5 ? 1u : 0u));
+		}
+		{
+			systems::ManualExecutionManager em(0.002);
+			Wam8g wam(&em,backPucks,NULL,profile);
+			double mean=0, longest=0;
+			const long before=wam.getLowLevelWam().getSyncToTorqueTime(&mean,&longest);
+			const double sumBefore=mean*before;
+			splitBus.sent.clear();
+			em.runExecutionCycle();
+			assert(cyclic(splitBus)==Ids({0x80,0x201,0x205}) && splitBus.replies.empty());
+			assert(wam.getLowLevelWam().getSyncToTorqueTime(&mean,&longest)==before+1);
+			near(mean*(before+1)-sumBefore,8*0.0001,1e-9);
+			near(wam.getJointPositions()[5],-128*2*M_PI/4096/8.7456);
+		}
+	}
+
 	// A synthetic, explicitly test-only serial geometry exercises J5-dependent
 	// FK and the seven-column partial Jacobian. This is NOT wrist calibration.
 	profile["kinematics_calibrated"]=true;
@@ -711,5 +814,5 @@ int main(int argc, char** argv)
 	profile["low_level"]["j2mp"][4][4]=1.0;
 	profile["gravity_compensation"]["mus"].remove(7);
 	throws([&]{Wam8g invalid(NULL,pucks,NULL,profile);}); assert(bus.sent.empty());
-	std::cout << "PASS wam8g: real eight-node I/O, seven commands, passive isolation, differential torque, FK/Jacobian, wrench/gravity mapping, per-bus masks, eight-joint zeroing and zero keeping, startup guards\n";
+	std::cout << "PASS wam8g: real eight-node I/O, seven commands, passive isolation, differential torque, FK/Jacobian, wrench/gravity mapping, per-bus masks, eight-joint zeroing and zero keeping, startup guards, wrist sampled first\n";
 }

@@ -53,6 +53,7 @@ public:
 	// COB-ID allocation (contract section 3)
 	static const int COB_NMT        = 0x000;
 	static const int COB_SYNC       = 0x080;
+	static const int COB_SYNC_WRIST = 0x090;  // see setWristSyncFirst(); not in the contract
 	static const int COB_EMCY_BASE  = 0x080;  // + node
 	static const int COB_TPDO1_BASE = 0x180;  // + node: puck position / SB status
 	static const int COB_QUAD_A     = 0x201;  // torque quad, pucks 1-4
@@ -75,6 +76,7 @@ public:
 	// CiA-402 / P4 objects used by the host (contract section 5.1)
 	static const int OD_DEVICE_TYPE   = 0x1000;
 	static const int OD_IDENTITY      = 0x1018;  // :03 revision, :04 serial
+	static const int OD_SYNC_COB      = 0x1005;  // the SYNC a node answers
 	static const int OD_SYNC_PERIOD   = 0x1006;  // us
 	static const int OD_HB_PRODUCER   = 0x1017;  // ms
 	static const int OD_CONTROLWORD   = 0x6040;
@@ -113,6 +115,10 @@ public:
 	/** Emit one SYNC (pucks return position TPDOs and apply the
 	    previously received torque RPDOs). */
 	static int sync(const CommunicationsBus& bus);
+
+	/** Emit the SYNC of the pucks of quad B (nodes 5-8), which they answer
+	    instead of sync() while setWristSyncFirst() is on. */
+	static int syncWrist(const CommunicationsBus& bus);
 
 	/** Emit one host heartbeat (0x77F), which the safety board uses to
 	    detect a live host while IDLE (contract section 7.5). */
@@ -203,6 +209,17 @@ public:
 	static int getTorqueInterpolationMs(const CommunicationsBus& bus) {
 		return bus.torqueInterpolationMs > 0 ? bus.torqueInterpolationMs : SYNC_PERIOD_US / 1000;
 	}
+
+	/** Sample the pucks of quad B (nodes 5-8) ahead of the arm.  They are
+	    given a SYNC of their own (COB_SYNC_WRIST, written to 0x1005), which
+	    the control cycle sends first; the arm's SYNC follows when their
+	    positions are in.  The arm's torques are then computed four position
+	    frames (about 0.35 ms) after the arm was sampled instead of eight.
+	    Off (the default): one SYNC for every puck, as in the contract.  Set
+	    by ProductManager from bus.wrist_sync_first before waking the pucks. */
+	static void setWristSyncFirst(const CommunicationsBus& bus, bool on) { bus.wristSyncFirst = on; }
+	static bool getWristSyncFirst(const CommunicationsBus& bus) { return bus.wristSyncFirst; }
+	static bool answersWristSync(const CommunicationsBus& bus, int node) { return bus.wristSyncFirst && node >= 5; }
 
 	/** Select CST mode on one motor puck.  P4 firmware 4.3.2 accepts a
 	    0x6060 write only while Operation-Enabled, so this clears the torque

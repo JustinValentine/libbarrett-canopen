@@ -398,6 +398,11 @@ void LowLevelWam<DOF>::update()
 	// and send their positions, which are collected below.  The host
 	// heartbeat goes out on the same cycle every 250 ms.  Joint encoders
 	// are not supported over CANopen.
+	//
+	// With bus.wrist_sync_first the pucks of quad B answer a SYNC of
+	// their own, sent first; the arm's SYNC goes out when their positions
+	// are in.  The arm is then sampled last, and its torque frame leaves
+	// four position frames after its sample instead of eight.
 	{
 		BARRETT_SCOPED_LOCK(bus.getMutex());
 
@@ -405,39 +410,51 @@ void LowLevelWam<DOF>::update()
 		// cycle, they would keep that puck a cycle behind for good.
 		unsigned char data[bus::CommunicationsBus::MAX_MESSAGE_LEN];
 		size_t len;
+		bool wristFirst = false;
 		for (size_t i = 0; i < DOF; ++i) {
 			const int busId = bus::CANopen::COB_TPDO1_BASE + pucks[i]->getId();
 			for (int n = 0; n < 16  &&  bus.receive(busId, data, len, false) == 0; ++n) {
 			}
+			wristFirst = wristFirst  ||  bus::CANopen::answersWristSync(bus, pucks[i]->getId());
 		}
 
-		if (bus::CANopen::sync(bus) != 0) {
-			(logMessage("LowLevelWam::%s(): could not send SYNC.") % __func__)
-					.template raise<std::runtime_error>();
-		}
-		syncTime = highResolutionSystemTime();
-		if (++hbDivider >= 125) {  // 250 ms at the 500 Hz cycle rate
-			hbDivider = 0;
-			bus::CANopen::hostHeartbeat(bus);
-		}
+		// The wrist's pass first, if it has a SYNC of its own; then the
+		// arm's, or everyone's.
+		for (int pass = wristFirst ? 0 : 1; pass < 2; ++pass) {
+			const bool wristPass = (pass == 0);
+			if ((wristPass ? bus::CANopen::syncWrist(bus) : bus::CANopen::sync(bus)) != 0) {
+				(logMessage("LowLevelWam::%s(): could not send SYNC.") % __func__)
+						.template raise<std::runtime_error>();
+			}
+			if (!wristPass) {
+				syncTime = highResolutionSystemTime();
+				if (++hbDivider >= 125) {  // 250 ms at the 500 Hz cycle rate
+					hbDivider = 0;
+					bus::CANopen::hostHeartbeat(bus);
+				}
+			}
 
-		for (size_t i = 0; i < DOF; ++i) {
-			int busId = bus::CANopen::COB_TPDO1_BASE + pucks[i]->getId();
-			int ret = bus.receive(busId, data, len, true, true);
-			if (ret != 0) {
-				(logMessage("LowLevelWam::%s(): Failed to receive position "
-						"TPDO for Puck %d: receive() returned %d.")
-						% __func__ % pucks[i]->getId() % ret)
-						.template raise<std::runtime_error>();
+			for (size_t i = 0; i < DOF; ++i) {
+				if (bus::CANopen::answersWristSync(bus, pucks[i]->getId()) != wristPass) {
+					continue;
+				}
+				int busId = bus::CANopen::COB_TPDO1_BASE + pucks[i]->getId();
+				int ret = bus.receive(busId, data, len, true, true);
+				if (ret != 0) {
+					(logMessage("LowLevelWam::%s(): Failed to receive position "
+							"TPDO for Puck %d: receive() returned %d.")
+							% __func__ % pucks[i]->getId() % ret)
+							.template raise<std::runtime_error>();
+				}
+				double counts;
+				if (MotorPuck::MotorPositionParser<double>::parse(
+						pucks[i]->getId(), 0, &counts, data, len) != 0) {
+					(logMessage("LowLevelWam::%s(): Malformed position TPDO "
+							"from Puck %d.") % __func__ % pucks[i]->getId())
+							.template raise<std::runtime_error>();
+				}
+				pp[i] = posSign[i] * counts + ppOffset[i];
 			}
-			double counts;
-			if (MotorPuck::MotorPositionParser<double>::parse(
-					pucks[i]->getId(), 0, &counts, data, len) != 0) {
-				(logMessage("LowLevelWam::%s(): Malformed position TPDO "
-						"from Puck %d.") % __func__ % pucks[i]->getId())
-						.template raise<std::runtime_error>();
-			}
-			pp[i] = posSign[i] * counts + ppOffset[i];
 		}
 		// Under the lock: definePosition() rewrites pp from another thread.
 		jp_motorEncoder = p2jp * pp;  // Convert from Puck positions to joint positions

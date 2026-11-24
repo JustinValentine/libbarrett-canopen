@@ -373,12 +373,27 @@ void ProductManager::wakeAllPucks() const
 		}
 		torqueInterpolationMs = setting;
 	}
+	bool wristSyncFirst = false;
+	if (config.exists("bus.wrist_sync_first")) {
+		const libconfig::Setting& setting = config.lookup("bus.wrist_sync_first");
+		if (setting.getType() != libconfig::Setting::TypeBoolean) {
+			throw std::invalid_argument("bus.wrist_sync_first must be true or false.");
+		}
+		wristSyncFirst = setting;
+	}
+	if (wristSyncFirst && !torqueOnArrival) {
+		// A frame taken at a SYNC waits for that SYNC however early it is
+		// sent: sampling the wrist first would only make the wrist later.
+		throw std::invalid_argument("bus.wrist_sync_first needs bus.torque_on_arrival = true.");
+	}
 	bus::CANopen::setTorqueInterpolationMs(*bus, torqueInterpolationMs);
 	bus::CANopen::setTorqueOnArrival(*bus, torqueOnArrival);
+	bus::CANopen::setWristSyncFirst(*bus, wristSyncFirst);
 	if (torqueOnArrival || torqueInterpolationMs != bus::CANopen::SYNC_PERIOD_US / 1000) {
 		// Printed as well as logged: it changes how the robot behaves.
-		logMessage("ProductManager::%s(): torque frames taken %s, interpolated over %d ms.", true)
-				% __func__ % (torqueOnArrival ? "on arrival" : "at a SYNC") % torqueInterpolationMs;
+		logMessage("ProductManager::%s(): torque frames taken %s, interpolated over %d ms%s.", true)
+				% __func__ % (torqueOnArrival ? "on arrival" : "at a SYNC") % torqueInterpolationMs
+				% (wristSyncFirst ? "; pucks 5-8 sampled first, on SYNC 0x090" : "");
 	}
 
 	// Tell the safety board which pucks to watch, and both it and the wake

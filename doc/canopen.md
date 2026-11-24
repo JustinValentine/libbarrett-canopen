@@ -91,16 +91,26 @@ data):
   a drive moves to a new torque target (`0x60C2:01`), 1 or 2 ms. The P4
   manual asks for the SYNC period, 2 ms. P4-37 pucks on firmware 4.3.2
   accept 1, but drives that were already armed kept moving in two steps.
+- `bus.wrist_sync_first` (optional, default `false`, needs
+  `torque_on_arrival`): pucks 5-8 are sampled ahead of the arm. They answer
+  a SYNC of their own (`0x090`, written to their `0x1005`), which each cycle
+  sends first; the usual SYNC follows when their positions are in. The arm's
+  torque frame then leaves four position frames (about 0.3 ms) sooner after
+  the arm's sample; the wrist's leaves about 0.15 ms later after its own.
+  `0x1005` lives in the pucks' RAM: until they are reset, pucks 5-8 do not
+  answer `0x080`, so other programs see no positions from them. A start
+  without the setting puts them back.
 
-Neither setting can be confirmed by reading the pucks back: after a reset a
-P4 keeps its saved transmission types through the first setup while its
-objects read as written (the library writes the setup twice for that
-reason). Check the torque delay on the robot after changing them.
+The first two settings cannot be confirmed by reading the pucks back:
+after a reset a P4 keeps its saved transmission types through the first
+setup while its objects read as written (the library writes the setup twice
+for that reason). Check the torque delay on the robot after changing them.
 
 When a WAM is destroyed the library prints the time from the arm's SYNC to
 its torque frame being sent (mean and longest);
 `LowLevelWam::getSyncToTorqueTime()` returns it. It is the bus and host
-share of the delay from position sample to torque.
+share of the delay from position sample to torque, and what
+`wrist_sync_first` shortens.
 
 The safety board's velocity and torque limits (`VL1`, `VL2`, `TL1`, `TL2`)
 are held in its RAM and return to their defaults when the board powers up.

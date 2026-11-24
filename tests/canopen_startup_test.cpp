@@ -39,7 +39,7 @@ struct FakeBus : barrett::bus::CommunicationsBus {
  std::function<void(Frame&)> alter;
  FakeBus() {
   objects[Key(10,0x2008,0)] = 1;
-  for(int n=1;n<=8;n++) { objects[Key(n,0x3013,1)] = 4096; objects[Key(n,0x6041,0)] = 0x40; }
+  for(int n=1;n<=8;n++) { objects[Key(n,0x3013,1)] = 4096; objects[Key(n,0x6041,0)] = 0x40; objects[Key(n,0x1005,0)] = 0x80; }
  }
  barrett::thread::Mutex& getMutex() const override { return mutex; }
  void open(int) override {} void close() override {} bool isOpen() const override { return true; }
@@ -227,6 +227,55 @@ int main() {
   FakeBus bus; throws([&]{ CANopen::setTorqueInterpolationMs(bus,ms); });
   assert(CANopen::getTorqueInterpolationMs(bus)==2); ++cases;
  }
+ // The SYNC a puck answers (0x1005).  0: setting off, stock puck: one
+ // read, no write.  1: on, an arm puck: the same.  2: on, a wrist puck:
+ // written and read back.  3: off, a puck left on the wrist's SYNC by an
+ // earlier run: put back.
+ for(int mode=0; mode<4; ++mode) {
+  FakeBus bus; const int node = (mode==1) ? 3 : 6;
+  assert(!CANopen::getWristSyncFirst(bus) && !CANopen::answersWristSync(bus,node));
+  if(mode==1 || mode==2) CANopen::setWristSyncFirst(bus,true);
+  assert(CANopen::answersWristSync(bus,node)==(mode==2));
+  if(mode==3) bus.objects[FakeBus::Key(node,0x1005,0)]=0x90;
+  CANopen::configureMotorPuck(bus,node);
+  size_t reads=0, wrote=0; int firstPdoWrite=-1, syncWrite=-1;
+  for(size_t i=0;i<bus.writes.size();++i) {
+   const Frame& f=bus.writes[i];
+   if(f.id!=0x600+node) continue;
+   if(firstPdoWrite<0 && f.d[0]!=0x40 && f.d[2]==0x18) firstPdoWrite=int(i);
+   if(f.d[1]!=0x05 || f.d[2]!=0x10) continue;
+   if(f.d[0]==0x40) ++reads;
+   else { ++wrote; syncWrite=int(i); assert(f.d[0]==0x23 && f.d[4]==(mode==2 ? 0x90 : 0x80) && !f.d[5] && !f.d[6] && !f.d[7]); }
+  }
+  assert(bus.objects[FakeBus::Key(node,0x1005,0)]==(mode==2 ? 0x90u : 0x80u));
+  assert(wrote==(mode>=2 ? 1u : 0u) && reads==(mode>=2 ? 2u : 1u));
+  if(wrote) assert(syncWrite<firstPdoWrite);  // before the position frame is set up
+  ++cases;
+ }
+ {
+  // The passive joint's puck is sampled with the wrist.
+  FakeBus bus; CANopen::setWristSyncFirst(bus,true); CANopen::configureSensorPuck(bus,5);
+  assert(bus.objects[FakeBus::Key(5,0x1005,0)]==0x90u);
+  FakeBus arm; CANopen::setWristSyncFirst(arm,true); CANopen::configureSensorPuck(arm,4);
+  assert(arm.objects[FakeBus::Key(4,0x1005,0)]==0x80u); ++cases;
+ }
+ {
+  // A puck that refuses the read of 0x1005 is left alone when it should be
+  // on 0x80 (as before the option existed); the wrist's SYNC must be taken.
+  FakeBus bus; bus.abortIndex=0x1005; CANopen::configureMotorPuck(bus,6);
+  assert(bus.objects[FakeBus::Key(6,0x1800,2)]==0u && bus.objects[FakeBus::Key(6,0x60C2,1)]==2u);
+  for(const Frame& f : bus.writes) assert(!(f.d[1]==0x05 && f.d[2]==0x10 && f.d[0]!=0x40));
+  FakeBus on; on.abortIndex=0x1005; CANopen::setWristSyncFirst(on,true);
+  CANopen::configureMotorPuck(on,2);
+  throws([&]{ CANopen::configureMotorPuck(on,6); }); ++cases;
+ }
+ {
+  // A puck that acknowledges the write but still reads 0x80: stop.
+  FakeBus bus; CANopen::setWristSyncFirst(bus,true);
+  bus.alter=[](Frame& r){ if(r.d[0]==0x43 && r.d[1]==0x05 && r.d[2]==0x10) { r.d[4]=0x80; } };
+  throws([&]{ CANopen::configureMotorPuck(bus,7); });
+  assert(bus.objects.count(FakeBus::Key(7,0x1800,2))==0); ++cases;
+ }
  {
   // A sensor-only puck gets no torque frame either way.
   FakeBus bus; CANopen::setTorqueOnArrival(bus,true); CANopen::configureSensorPuck(bus,5);
@@ -294,11 +343,22 @@ int main() {
   opm.wakeAllPucks(); assert(!CANopen::getTorqueOnArrival(off) && CANopen::getTorqueInterpolationMs(off)==2); ++cases;
  }
  for(const char* bad : {"torque_on_arrival=1;","torque_on_arrival=\"yes\";","torque_interpolation_ms=0;",
-   "torque_interpolation_ms=3;","torque_interpolation_ms=1.0;","torque_interpolation_ms=true;"}) {
-  // A bad value stops startup before anything is sent.
+   "torque_interpolation_ms=3;","torque_interpolation_ms=1.0;","torque_interpolation_ms=true;",
+   "wrist_sync_first=true;","torque_on_arrival=false;wrist_sync_first=true;",
+   "torque_on_arrival=true;wrist_sync_first=1;","torque_on_arrival=true;wrist_sync_first=\"yes\";"}) {
+  // A bad value stops startup before anything is sent.  Sampling the
+  // wrist first is refused without torque frames taken on arrival.
   FakeBus bus; barrett::ProductManager pm(bus,(std::string("bus:{expected_puck_mask=0x1FE;")+bad+"};wam8g:{};").c_str());
   throws([&]{pm.wakeAllPucks();}); assert(bus.writes.empty() && barrett::Puck::wakes==0);
-  assert(!CANopen::getTorqueOnArrival(bus)); ++cases;
+  assert(!CANopen::getTorqueOnArrival(bus) && !CANopen::getWristSyncFirst(bus)); ++cases;
+ }
+ {
+  FakeBus bus; barrett::ProductManager pm(bus,"bus:{expected_puck_mask=0x1FE;torque_on_arrival=true;torque_interpolation_ms=1;wrist_sync_first=true;};wam8g:{};");
+  pm.wakeAllPucks(); assert(barrett::Puck::wakes==1);
+  assert(CANopen::getTorqueOnArrival(bus) && CANopen::getTorqueInterpolationMs(bus)==1 && CANopen::getWristSyncFirst(bus));
+  for(int n=1;n<=8;++n) assert(CANopen::answersWristSync(bus,n)==(n>=5));
+  FakeBus off; barrett::ProductManager opm(off,"bus:{expected_puck_mask=0x1FE;torque_on_arrival=true;wrist_sync_first=false;};wam8g:{};");
+  opm.wakeAllPucks(); assert(CANopen::getTorqueOnArrival(off) && !CANopen::getWristSyncFirst(off)); ++cases;
  }
   for(int mask : {0,-1,1,0x200}) {
   FakeBus bus; barrett::ProductManager pm(bus); pm.config.lookup("bus.expected_puck_mask")=mask;

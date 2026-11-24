@@ -49,6 +49,7 @@ const int CANopen::MIN_PUCK_NODE;
 const int CANopen::MAX_PUCK_NODE;
 const int CANopen::COB_NMT;
 const int CANopen::COB_SYNC;
+const int CANopen::COB_SYNC_WRIST;
 const int CANopen::COB_EMCY_BASE;
 const int CANopen::COB_TPDO1_BASE;
 const int CANopen::COB_QUAD_A;
@@ -66,6 +67,7 @@ const int CANopen::NMT_RESET_NODE;
 const int CANopen::NMT_RESET_COMM;
 const int CANopen::OD_DEVICE_TYPE;
 const int CANopen::OD_IDENTITY;
+const int CANopen::OD_SYNC_COB;
 const int CANopen::OD_SYNC_PERIOD;
 const int CANopen::OD_HB_PRODUCER;
 const int CANopen::OD_CONTROLWORD;
@@ -121,6 +123,12 @@ int CANopen::sync(const CommunicationsBus& bus)
 {
 	unsigned char dummy = 0;  // send() copies from the pointer even for an empty frame
 	return bus.send(COB_SYNC, &dummy, 0);
+}
+
+int CANopen::syncWrist(const CommunicationsBus& bus)
+{
+	unsigned char dummy = 0;
+	return bus.send(COB_SYNC_WRIST, &dummy, 0);
 }
 
 int CANopen::hostHeartbeat(const CommunicationsBus& bus)
@@ -536,6 +544,26 @@ namespace {
 // pucks (contract section 5.3, steps 4-7).
 void configureFeedback(const CommunicationsBus& bus, int node)
 {
+	// Which SYNC the puck answers (0x1005), kept in the puck's RAM: a
+	// reset restores 0x80.  The stock value is written only to a puck
+	// that reads otherwise (left on the wrist's SYNC by an earlier run),
+	// so a stock setup sees one read and no write.  The wrist's SYNC is
+	// written every time, as the transmission types are (see Puck::wake()).
+	const int syncCob = CANopen::answersWristSync(bus, node) ? CANopen::COB_SYNC_WRIST : CANopen::COB_SYNC;
+	int syncNow = 0;
+	bool known = false;
+	try {
+		known = CANopen::sdoUpload(bus, node, CANopen::OD_SYNC_COB, 0, &syncNow, 0.2) == 0;
+	} catch (const std::runtime_error&) {
+	}
+	if (syncCob != CANopen::COB_SYNC  ||  (known  &&  (syncNow & 0x7FF) != syncCob)) {
+		CANopen::sdoDownload(bus, node, CANopen::OD_SYNC_COB, 0, syncCob, 4);
+		if (CANopen::sdoUpload(bus, node, CANopen::OD_SYNC_COB, 0, &syncNow, 0.2) != 0  ||  (syncNow & 0x7FF) != syncCob) {
+			(logMessage("CANopen: node %d did not take SYNC identifier 0x%03x (0x1005 reads 0x%x). Startup stopped.")
+					% node % syncCob % syncNow).raise<std::runtime_error>();
+		}
+	}
+
 	// TPDO1: position actual value, sent on every SYNC
 	CANopen::sdoDownload(bus, node, 0x1800, 1, PDO_COB_INVALID | (CANopen::COB_TPDO1_BASE + node), 4);
 	CANopen::sdoDownload(bus, node, 0x1A00, 0, 0, 1);

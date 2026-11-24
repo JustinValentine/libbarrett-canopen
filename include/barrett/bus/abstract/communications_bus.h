@@ -45,7 +45,7 @@ namespace bus {
 
 class CommunicationsBus {
 public:
-	CommunicationsBus() : sensorOnlyNodes(0), torqueOnArrival(false), torqueInterpolationMs(0) {}
+	CommunicationsBus() : sensorOnlyNodes(0), torqueOnArrival(false), torqueInterpolationMs(0), wristSyncFirst(false) {}
 	static const size_t MAX_MESSAGE_LEN = 8;  /** The maximum of any of the available communications buses */
 	static constexpr double TIMEOUT = 1.0;  /** Bus connection timeout limit in seconds */
 
@@ -70,6 +70,7 @@ private:
 	mutable int sensorOnlyNodes;  // see CANopen::setSensorOnlyNodes()
 	mutable bool torqueOnArrival;  // see CANopen::setTorqueOnArrival()
 	mutable int torqueInterpolationMs;  // see CANopen::setTorqueInterpolationMs(); 0: the SYNC period
+	mutable bool wristSyncFirst;  // see CANopen::setWristSyncFirst()
 	friend class CANopen;
 };
 
