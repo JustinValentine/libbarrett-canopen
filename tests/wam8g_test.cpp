@@ -253,6 +253,35 @@ int main(int argc, char** argv)
 			for(int n=1;n<=8;++n) assert(warmPucks[n-1]->isAwake());
 			Puck::wake(warmPucks, false);  // awake pucks are left alone
 		}
+		// Torque timing (bus.torque_on_arrival, bus.torque_interpolation_ms)
+		// reaches every motor puck through the wake, in both of the two
+		// setups a reset needs; the sensor-only puck gets no torque frame.
+		for (int mode=0; mode<2; ++mode) {
+			FakeBus timingBus;
+			CANopen::setSensorOnlyNodes(timingBus,0x20);
+			if (mode) { CANopen::setTorqueOnArrival(timingBus,true); CANopen::setTorqueInterpolationMs(timingBus,1); }
+			std::vector<std::unique_ptr<Puck> > timingOwned;
+			std::vector<Puck*> timingPucks;
+			for(int n=1;n<=8;++n) { timingOwned.emplace_back(new Puck(timingBus,n)); timingPucks.push_back(timingOwned.back().get()); }
+			Puck::wake(timingPucks);
+			for(int n=1;n<=8;++n) {
+				size_t typeWrites=0;
+				for(const auto& f:timingBus.sent) {
+					if(f.id==0x600+n && f.len==8 && f.data[0]!=0x40 && f.data[1]==0x00 && f.data[2]==0x14 && f.data[3]==2) {
+						++typeWrites; assert(f.data[4]==(mode ? 255 : 0));
+					}
+				}
+				if(n==5) {
+					assert(typeWrites==0 && (timingBus.objects[FakeBus::Key(n,0x1400,1)] & 0x80000000u));
+				} else {
+					assert(typeWrites==2);
+					assert(timingBus.objects[FakeBus::Key(n,0x1400,2)]==(mode ? 255u : 0u));
+					assert(timingBus.objects[FakeBus::Key(n,0x1400,1)]==(n<=4 ? 0x201u : 0x205u));
+					assert(timingBus.objects[FakeBus::Key(n,0x60C2,1)]==(mode ? 1u : 2u));
+					assert(timingBus.objects[FakeBus::Key(n,0x6060,0)]==uint32_t(CANopen::MODE_CST));
+				}
+			}
+		}
 		// A puck that never boots up still aborts the wake.
 		FakeBus deadBus; deadBus.neverBootsUp=3;
 		std::vector<std::unique_ptr<Puck> > deadOwned;

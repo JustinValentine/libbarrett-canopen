@@ -354,6 +354,33 @@ void ProductManager::wakeAllPucks() const
 	if (!foundSafetyModule()) {
 		throw std::runtime_error("ProductManager::wakeAllPucks(): no safety board; startup stopped.");
 	}
+
+	// Optional torque timing (doc/canopen.md).  Read before anything is
+	// sent, so that a bad value stops startup with the bus untouched.
+	bool torqueOnArrival = false;
+	if (config.exists("bus.torque_on_arrival")) {
+		const libconfig::Setting& setting = config.lookup("bus.torque_on_arrival");
+		if (setting.getType() != libconfig::Setting::TypeBoolean) {
+			throw std::invalid_argument("bus.torque_on_arrival must be true or false.");
+		}
+		torqueOnArrival = setting;
+	}
+	int torqueInterpolationMs = bus::CANopen::SYNC_PERIOD_US / 1000;
+	if (config.exists("bus.torque_interpolation_ms")) {
+		const libconfig::Setting& setting = config.lookup("bus.torque_interpolation_ms");
+		if (setting.getType() != libconfig::Setting::TypeInt) {
+			throw std::invalid_argument("bus.torque_interpolation_ms must be a whole number of ms.");
+		}
+		torqueInterpolationMs = setting;
+	}
+	bus::CANopen::setTorqueInterpolationMs(*bus, torqueInterpolationMs);
+	bus::CANopen::setTorqueOnArrival(*bus, torqueOnArrival);
+	if (torqueOnArrival || torqueInterpolationMs != bus::CANopen::SYNC_PERIOD_US / 1000) {
+		// Printed as well as logged: it changes how the robot behaves.
+		logMessage("ProductManager::%s(): torque frames taken %s, interpolated over %d ms.", true)
+				% __func__ % (torqueOnArrival ? "on arrival" : "at a SYNC") % torqueInterpolationMs;
+	}
+
 	// Tell the safety board which pucks to watch, and both it and the wake
 	// path which of them are sensor-only (the wam8g's passive J5).
 	const int mask = foundWam8g() ? (1 << 5) : 0;

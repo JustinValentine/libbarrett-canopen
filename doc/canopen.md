@@ -81,6 +81,21 @@ data):
   commutation zero has been calibrated.
 - `low_level.zeroangle` and `low_level.zeroangle_dir`: written by
   `bt-wam-zerocal`.
+- `bus.torque_on_arrival` (optional, default `false`): the motor pucks take
+  the torque frame when it arrives (RPDO1 transmission type 255) instead of
+  at the next SYNC (type 0, the contract's setting). With type 0 a P4 copies
+  the frame into its torque target only after that SYNC, so the torque
+  starts one control period later. The safety board reads the same frames
+  either way.
+- `bus.torque_interpolation_ms` (optional, default 2): the time over which
+  a drive moves to a new torque target (`0x60C2:01`), 1 or 2 ms. The P4
+  manual asks for the SYNC period, 2 ms. P4-37 pucks on firmware 4.3.2
+  accept 1, but drives that were already armed kept moving in two steps.
+
+Neither setting can be confirmed by reading the pucks back: after a reset a
+P4 keeps its saved transmission types through the first setup while its
+objects read as written (the library writes the setup twice for that
+reason). Check the torque delay on the robot after changing them.
 
 The safety board's velocity and torque limits (`VL1`, `VL2`, `TL1`, `TL2`)
 are held in its RAM and return to their defaults when the board powers up.

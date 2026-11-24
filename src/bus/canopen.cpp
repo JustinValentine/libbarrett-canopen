@@ -85,6 +85,8 @@ const int CANopen::SB_ZERO_RECORD;
 const int CANopen::SB_ZERO_RECORD_VERS;
 const int CANopen::OD_RAW_POSITION;
 const int CANopen::SYNC_PERIOD_US;
+const int CANopen::RPDO_ON_SYNC;
+const int CANopen::RPDO_ON_ARRIVAL;
 const int CANopen::PUCK_HB_PERIOD_MS;
 
 namespace {
@@ -585,7 +587,10 @@ void CANopen::configureMotorPuck(const CommunicationsBus& bus, int node)
 		sdoDownload(bus, node, 0x1600, j + 1, entry, 4);
 	}
 	sdoDownload(bus, node, 0x1600, 0, 4, 1);
-	sdoDownload(bus, node, 0x1400, 2, 0, 1);  // type 0: apply on SYNC
+	// Taken at the next SYNC (the contract), or when the frame arrives.
+	// A P4 copies a frame taken at a SYNC into its torque target only
+	// after that SYNC, so the torque acts one control period later.
+	sdoDownload(bus, node, 0x1400, 2, getTorqueOnArrival(bus) ? RPDO_ON_ARRIVAL : RPDO_ON_SYNC, 1);
 	sdoDownload(bus, node, 0x1400, 1, quadCob, 4);
 
 	// RPDO2: controlword + mode of operation, linked to the safety
@@ -604,8 +609,16 @@ void CANopen::configureMotorPuck(const CommunicationsBus& bus, int node)
 
 	// CST needs both cyclic timing objects
 	sdoDownload(bus, node, OD_SYNC_PERIOD, 0, SYNC_PERIOD_US, 4);
-	sdoDownload(bus, node, OD_INTERP_PERIOD, 1, SYNC_PERIOD_US / 1000, 1);
+	sdoDownload(bus, node, OD_INTERP_PERIOD, 1, getTorqueInterpolationMs(bus), 1);
 	sdoDownload(bus, node, OD_INTERP_PERIOD, 2, 0xFD, 1);
+}
+
+void CANopen::setTorqueInterpolationMs(const CommunicationsBus& bus, int ms)
+{
+	if (ms < 1 || ms > SYNC_PERIOD_US / 1000) {
+		throw std::invalid_argument("CANopen::setTorqueInterpolationMs(): from 1 ms to the SYNC period.");
+	}
+	bus.torqueInterpolationMs = ms;
 }
 
 void CANopen::configureSensorPuck(const CommunicationsBus& bus, int node)

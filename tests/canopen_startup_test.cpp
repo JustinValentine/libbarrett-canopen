@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <string>
 #include <tuple>
 #include <vector>
 #include <barrett/os.h>
@@ -195,6 +196,43 @@ int main() {
   FakeBus bus; bus.abortIndex=index;
   throws([&]{ CANopen::configureMotorPuck(bus,1); }); ++cases;
  }
+ // Torque timing: when a motor puck takes the torque frame (RPDO1
+ // transmission type) and the interpolation period it is given.
+ for(int mode=0; mode<3; ++mode) {
+  FakeBus bus;
+  assert(!CANopen::getTorqueOnArrival(bus) && CANopen::getTorqueInterpolationMs(bus)==2);
+  if(mode>=1) CANopen::setTorqueOnArrival(bus,true);
+  if(mode==2) CANopen::setTorqueInterpolationMs(bus,1);
+  CANopen::configureMotorPuck(bus,3);
+  assert(bus.objects[FakeBus::Key(3,0x1400,2)]==(mode ? 255u : 0u));
+  assert(bus.objects[FakeBus::Key(3,0x1400,1)]==0x201u);  // linked and valid
+  assert(bus.objects[FakeBus::Key(3,0x1600,3)]==0x60710010u);  // still the torque target, third slot
+  assert(bus.objects[FakeBus::Key(3,0x1401,2)]==255u);  // the enable broadcast, as before
+  assert(bus.objects[FakeBus::Key(3,0x1800,2)]==0u);  // positions on every SYNC
+  assert(bus.objects[FakeBus::Key(3,0x60C2,1)]==(mode==2 ? 1u : 2u));
+  assert(bus.objects[FakeBus::Key(3,0x60C2,2)]==0xFDu && bus.objects[FakeBus::Key(3,0x1006,0)]==2000u);
+  // The type is written while the PDO is invalid, before it is linked again.
+  int invalid=-1, type=-1, linked=-1;
+  for(size_t i=0;i<bus.writes.size();++i) {
+   const Frame& f=bus.writes[i];
+   if(f.id!=0x603 || f.d[0]==0x40 || f.d[1]!=0x00 || f.d[2]!=0x14) continue;
+   if(f.d[3]==1 && (f.d[7]&0x80)) invalid=int(i);
+   if(f.d[3]==1 && !(f.d[7]&0x80)) linked=int(i);
+   if(f.d[3]==2) { type=int(i); assert(f.d[4]==(mode ? 255 : 0)); }
+  }
+  assert(invalid>=0 && invalid<type && type<linked);
+  ++cases;
+ }
+ for(int ms : {0,3,-1}) {
+  FakeBus bus; throws([&]{ CANopen::setTorqueInterpolationMs(bus,ms); });
+  assert(CANopen::getTorqueInterpolationMs(bus)==2); ++cases;
+ }
+ {
+  // A sensor-only puck gets no torque frame either way.
+  FakeBus bus; CANopen::setTorqueOnArrival(bus,true); CANopen::configureSensorPuck(bus,5);
+  assert(bus.objects[FakeBus::Key(5,0x1400,1)] & 0x80000000u);
+  assert(bus.objects.count(FakeBus::Key(5,0x1400,2))==0 && bus.objects.count(FakeBus::Key(5,0x60C2,1))==0); ++cases;
+ }
  {
   FakeBus bus; CANopen::armCstMode(bus,1);
   assert(bus.objects[FakeBus::Key(1,0x6041,0)]==0x40);
@@ -243,6 +281,24 @@ int main() {
   FakeBus bus; barrett::ProductManager pm(bus,"bus:{expected_puck_mask=0x1FE;};");
   throws([&]{pm.foundWam4();}); throws([&]{pm.wakeAllPucks();});
   assert(bus.writes.empty()); ++cases;
+ }
+ {
+  // The torque timing settings of the configuration reach the bus; without
+  // them the contract's timing stays.
+  FakeBus bus; barrett::ProductManager pm(bus);
+  pm.wakeAllPucks(); assert(!CANopen::getTorqueOnArrival(bus) && CANopen::getTorqueInterpolationMs(bus)==2);
+  FakeBus fast; barrett::ProductManager fpm(fast,"bus:{expected_puck_mask=0x1FE;torque_on_arrival=true;torque_interpolation_ms=1;};wam8g:{};");
+  fpm.wakeAllPucks(); assert(CANopen::getTorqueOnArrival(fast) && CANopen::getTorqueInterpolationMs(fast)==1);
+  assert(barrett::Puck::wakes==1);
+  FakeBus off; barrett::ProductManager opm(off,"bus:{expected_puck_mask=0x1FE;torque_on_arrival=false;torque_interpolation_ms=2;};wam8g:{};");
+  opm.wakeAllPucks(); assert(!CANopen::getTorqueOnArrival(off) && CANopen::getTorqueInterpolationMs(off)==2); ++cases;
+ }
+ for(const char* bad : {"torque_on_arrival=1;","torque_on_arrival=\"yes\";","torque_interpolation_ms=0;",
+   "torque_interpolation_ms=3;","torque_interpolation_ms=1.0;","torque_interpolation_ms=true;"}) {
+  // A bad value stops startup before anything is sent.
+  FakeBus bus; barrett::ProductManager pm(bus,(std::string("bus:{expected_puck_mask=0x1FE;")+bad+"};wam8g:{};").c_str());
+  throws([&]{pm.wakeAllPucks();}); assert(bus.writes.empty() && barrett::Puck::wakes==0);
+  assert(!CANopen::getTorqueOnArrival(bus)); ++cases;
  }
   for(int mask : {0,-1,1,0x200}) {
   FakeBus bus; barrett::ProductManager pm(bus); pm.config.lookup("bus.expected_puck_mask")=mask;

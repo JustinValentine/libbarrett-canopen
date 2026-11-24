@@ -99,6 +99,10 @@ public:
 	static const int OD_RAW_POSITION = 0x3012;     // :01 single-turn encoder, 0-4095
 
 	static const int SYNC_PERIOD_US = 2000;    // 500 Hz (contract section 8)
+
+	// RPDO transmission types (P4 manual, table 3)
+	static const int RPDO_ON_SYNC = 0;         // applied at the next SYNC
+	static const int RPDO_ON_ARRIVAL = 255;    // applied when the frame arrives
 	static const int PUCK_HB_PERIOD_MS = 250;  // written to 0x1017 (section 5.3)
 
 
@@ -160,7 +164,8 @@ public:
 
 
 	/** Configure one motor puck's communication objects (contract section
-	    5.3): torque-quad slice on RPDO1, controlword RPDO2 linked to the
+	    5.3): torque-quad slice on RPDO1 (taken at a SYNC or on arrival,
+	    see setTorqueOnArrival()), controlword RPDO2 linked to the
 	    safety board's broadcast, position TPDO1 on SYNC, statusword TPDO2,
 	    heartbeat producer and the cyclic timing objects.  Unused factory
 	    PDOs are disabled.  The node must be in NMT pre-operational: a SYNC
@@ -181,6 +186,23 @@ public:
 	static void setSensorOnlyNodes(const CommunicationsBus& bus, int mask) { bus.sensorOnlyNodes = mask; }
 	static int getSensorOnlyNodes(const CommunicationsBus& bus) { return bus.sensorOnlyNodes; }
 	static bool isSensorOnly(const CommunicationsBus& bus, int node) { return (bus.sensorOnlyNodes >> node) & 1; }
+
+	/** When the motor pucks take a torque frame (RPDO1): at the next SYNC
+	    (false, the contract's setting and the default) or when it arrives
+	    (true), which applies it one control period earlier.  Set by
+	    ProductManager from bus.torque_on_arrival before waking the pucks;
+	    it takes effect when the pucks are next configured. */
+	static void setTorqueOnArrival(const CommunicationsBus& bus, bool onArrival) { bus.torqueOnArrival = onArrival; }
+	static bool getTorqueOnArrival(const CommunicationsBus& bus) { return bus.torqueOnArrival; }
+
+	/** The time over which a drive moves to a new torque target (0x60C2:01,
+	    ms): from 1 to the SYNC period, which is the default and what the P4
+	    manual asks for.  Set by ProductManager from
+	    bus.torque_interpolation_ms.  Throws if out of range. */
+	static void setTorqueInterpolationMs(const CommunicationsBus& bus, int ms);
+	static int getTorqueInterpolationMs(const CommunicationsBus& bus) {
+		return bus.torqueInterpolationMs > 0 ? bus.torqueInterpolationMs : SYNC_PERIOD_US / 1000;
+	}
 
 	/** Select CST mode on one motor puck.  P4 firmware 4.3.2 accepts a
 	    0x6060 write only while Operation-Enabled, so this clears the torque
